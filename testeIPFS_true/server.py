@@ -52,7 +52,7 @@ async def upload_file(file: UploadFile = File(...)):
         
         print(f"✅ CID gerado: {cid}")
         
-        # Opcional: Publicar via PubSub
+        
         try:
             requests.post(
                 f"{IPFS_API_URL}/pubsub/pub",
