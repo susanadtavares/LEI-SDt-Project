@@ -10,7 +10,7 @@ peer_list = peers.get('Peers', [])
 
 if peer_list:
     print(f"✅ {len(peer_list)} peers conectados:\n")
-    for peer in peer_list[:10]:  # Mostrar apenas 10
+    for peer in peer_list[:20]:  # Mostrar apenas 10
         print(f"🔗 {peer['Peer']}")
         print(f"   Endereço: {peer['Addr']}\n")
 else:
