@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "cid": "QmUPwBXJwS93CWrFv5PzGyygf5XYRu1BLD7KohPSgCBGjs",
+      "filename": "teste_sprint2.txt",
+      "added_at": "2025-11-02T16:51:51.265178",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmUPwBXJwS93CWrFv5PzGyygf5XYRu1BLD7KohPSgCBGjs.npy"
+    }
+  ],
+  "last_updated": "2025-11-02T16:51:51.265178"
+}
