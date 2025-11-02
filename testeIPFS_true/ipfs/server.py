@@ -7,11 +7,8 @@ import base64
 
 app = FastAPI(title="IPFS Upload API")
 
-# URL da API HTTP do IPFS Desktop
 IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
 CANAL_PUBSUB = "canal-ficheiros"
-
-# ============= ENDPOINTS BASE =============
 
 @app.get("/")
 def root():
@@ -31,8 +28,6 @@ def root():
             "docs": "/docs"
         }
     }
-
-# ============= UPLOAD DE FICHEIROS =============
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -106,8 +101,6 @@ async def upload_file(file: UploadFile = File(...)):
             status_code=500
         )
 
-# ============= INFORMAÇÕES DE FICHEIROS =============
-
 @app.get("/info/{cid}")
 def file_info(cid: str):
     """Obtém informações sobre um CID"""
@@ -134,8 +127,6 @@ def file_info(cid: str):
             content={'error': str(e)},
             status_code=500
         )
-
-# ============= ESTATUTO DO IPFS =============
 
 @app.get("/status")
 def ipfs_status():
@@ -179,8 +170,6 @@ def list_connected_peers():
             }
     except Exception as e:
         return {'error': str(e)}, 500
-
-# ============= PEER DISCOVERY =============
 
 @app.get("/my-peer-info")
 def get_my_peer_info():
@@ -246,8 +235,6 @@ def connect_peer(peer_multiaddr: str):
             content={'error': str(e)},
             status_code=500
         )
-
-# ============= NOTIFICAÇÕES - PUBSUB STREAM =============
 
 @app.get("/notifications")
 async def get_notifications():
@@ -316,7 +303,7 @@ async def get_notifications():
         }
     )
 
-# ============= INICIALIZAÇÃO =============
+# ============= INIT =============
 
 if __name__ == "__main__":
     print("\n" + "="*60)
