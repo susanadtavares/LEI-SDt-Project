@@ -9,6 +9,11 @@ Este projeto surge no âmbito da disciplina de Sistemas Distribuídos, do Curso 
 - Susana Tavares - 27467
 - José Arrais - 23747 
 
+## Pré-requisitos
+
+- Python 3.12 ou superior
+- IPFS instalado e em execução
+
 ## Instalação
 
 1. Criar e ativar o ambiente virtual:
@@ -23,7 +28,24 @@ source venv/bin/activate # Linux/MacOS
 pip install -r requirements.txt
 ```
 
-3. Iniciar o servidor de desenvolvimento:
+## Procedimento de Testes
+
+1. Iniciar o servidor principal:
 ```bash
 python ipfs/server.py
 ```
+
+2. Iniciar o recetor de mensagens:
+```bash
+python ipfs/listen_notifications.py
+```
+
+3. Iniciar o cliente:
+```bash
+python ipfs/test_upload.py
+```
+
+## Documentação
+
+A documentação da API está disponível em:
+http://localhost:5000/docs
