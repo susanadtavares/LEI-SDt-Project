@@ -1,7 +1,7 @@
 import requests
 
 print("🔁 A enviar confirmação de versão para o líder...\n")
-response = requests.post("http://localhost:5000/ack-version")
+response = requests.post("http://25.42.152.214:5000/ack-version")
 
 if response.status_code == 200:
     result = response.json()

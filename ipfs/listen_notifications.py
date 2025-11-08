@@ -9,7 +9,7 @@ print("A ligar ao stream de notificações...\n")
 
 try:
     response = requests.get(
-        'http://localhost:5000/notifications',
+        'http://25.42.152.214:5000/notifications',
         stream=True,
         timeout=None
     )
