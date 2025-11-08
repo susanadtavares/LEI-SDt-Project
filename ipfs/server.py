@@ -43,7 +43,7 @@ def save_document_vector(vector_data):
     """Guarda vetor de documentos no ficheiro JSON"""
     with open(VECTOR_FILE, 'w') as f:
         json.dump(vector_data, f, indent=2)
-    print(f"Vetor guardado - Versão confirmada: {vector_data.get('version_confirmed', 0)}, Versão pendente: {vector_data.get('version_pending', 0)}")
+    print(f"Vetor guardado - Versão confirmada: {vector_data.get('version_confirmed', 0)}")
 
 def add_document_to_vector(cid, filename, embeddings, confirmed=False):
     """
