@@ -5,7 +5,7 @@ print("="*60)
 print("Upload com Embeddings")
 print("="*60)
 
-with open('teste_sprint2.txt', 'rb') as f:
+with open('teste_sprint3.txt', 'rb') as f:
     files = {'file': f}
     response = requests.post('http://25.42.152.214:5000/upload', files=files)
     
