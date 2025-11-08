@@ -32,8 +32,10 @@ def load_document_vector():
             return json.load(f)
     else:
         return {
-            "version": 0,
-            "documents": [],
+            "version_confirmed": 0,
+            "version_pending": 0,
+            "documents_confirmed": [],
+            "documents_pending": [],
             "last_updated": None
         }
 
@@ -43,36 +45,46 @@ def save_document_vector(vector_data):
         json.dump(vector_data, f, indent=2)
     print(f"Vetor guardado - Versão: {vector_data['version']}")
 
-def add_document_to_vector(cid, filename, embeddings):
+def add_document_to_vector(cid, filename, embeddings, confirmed=False):
     """
-    Adiciona um novo documento ao vetor com versioning
-    Retorna uma nova versão do vetor
+    Cria nova versão do vetor de documentos.
+    Se confirmed=False → cria versão temporária (pendente).
     """
     vector = load_document_vector()
-    
-    # Incrementa a versão
-    new_version = vector['version'] + 1
-    
-    # Adiciona o documento
+
+    # Se for a primeira execução, garantir chaves
+    vector.setdefault("version_confirmed", 0)
+    vector.setdefault("version_pending", vector["version_confirmed"])
+    vector.setdefault("documents_confirmed", [])
+    vector.setdefault("documents_pending", [])
+
+    # Incrementa versão pendente
+    new_version = vector["version_pending"] + 1
+
     doc_entry = {
         "cid": cid,
         "filename": filename,
         "added_at": datetime.now().isoformat(),
         "embedding_shape": embeddings.shape,
-        "embedding_file": f"{EMBEDDINGS_DIR}/{cid}.npy"
+        "embedding_file": f"{EMBEDDINGS_DIR}/{cid}.npy",
+        "confirmed": confirmed
     }
-    
-    vector['documents'].append(doc_entry)
-    vector['version'] = new_version
-    vector['last_updated'] = datetime.now().isoformat()
-    
-    # Guarda os embeddings separadamente
+
+    if confirmed:
+        vector["documents_confirmed"].append(doc_entry)
+        vector["version_confirmed"] = new_version
+        print(f"✅ Documento confirmado — versão {new_version}")
+    else:
+        vector["documents_pending"].append(doc_entry)
+        vector["version_pending"] = new_version
+        print(f"🕒 Documento pendente — versão {new_version}")
+
+    vector["last_updated"] = datetime.now().isoformat()
+
+    # Guarda embedding
     np.save(f"{EMBEDDINGS_DIR}/{cid}.npy", embeddings)
-    print(f"Embedding guardado: {cid}.npy")
-    
-    # Guarda o vetor atualizado
     save_document_vector(vector)
-    
+
     return new_version, vector
 
 def generate_embeddings(text_content):
@@ -127,10 +139,9 @@ def propagate_to_peers(version, cid, filename, embeddings):
         # Publica via PubSub
         response = requests.post(
             f"{IPFS_API_URL}/pubsub/pub",
-            params={
-                'arg': CANAL_PUBSUB,
-                'arg': message_json
-            },
+            params={'arg': CANAL_PUBSUB},
+            data=message_json.encode('utf-8'),
+            headers={'Content-Type': 'text/plain'},
             timeout=5
         )
         
@@ -156,8 +167,8 @@ def root():
         "message": "API IPFS ativa",
         "status": "running",
         "version": "2.0",
-        "document_vector_version": vector['version'],
-        "total_documents": len(vector['documents']),
+        "document_vector_version": vector.get("version_confirmed", 0),
+        "total_documents": len(vector.get("documents_confirmed", [])),
         "endpoints": {
             "upload": "/upload (POST)",
             "vector": "/vector (GET)",
@@ -264,13 +275,16 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.get("/vector")
 def get_document_vector():
-    """Retorna o vetor atual de documentos"""
+    """Retorna o vetor atual de documentos (confirmados e pendentes)"""
     vector = load_document_vector()
     return {
-        'version': vector['version'],
-        'total_documents': len(vector['documents']),
-        'last_updated': vector['last_updated'],
-        'documents': vector['documents']
+        'version_confirmed': vector.get('version_confirmed', 0),
+        'version_pending': vector.get('version_pending', 0),
+        'total_confirmed': len(vector.get('documents_confirmed', [])),
+        'total_pending': len(vector.get('documents_pending', [])),
+        'last_updated': vector.get('last_updated'),
+        'documents_confirmed': vector.get('documents_confirmed', []),
+        'documents_pending': vector.get('documents_pending', [])
     }
 
 @app.get("/vector/{cid}/embedding")
@@ -338,8 +352,8 @@ def ipfs_status():
             return {
                 'status': 'connected',
                 'ipfs_version': version_info.get('Version'),
-                'vector_version': vector['version'],
-                'total_documents': len(vector['documents']),
+                'vector_version': vector.get('version_confirmed', 0),
+                'total_documents': len(vector.get('documents_confirmed', [])),
                 'message': 'IPFS Desktop está ativo'
             }
     except:
@@ -458,7 +472,7 @@ async def get_notifications():
                     try:
                         msg = json.loads(line)
                         data_encoded = msg.get('data', '')
-                        
+
                         try:
                             data_decoded = base64.b64decode(data_encoded).decode('utf-8')
                         except:
@@ -486,25 +500,32 @@ async def get_notifications():
                                     embeddings_array = np.array(message_obj['embeddings'])
                                     np.save(f"{EMBEDDINGS_DIR}/{message_obj['cid']}.npy", embeddings_array)
                                     print(f"Embedding recebido e guardado: {message_obj['cid']}")
-                                    
-                                    # Atualiza o vetor local
+
+                                    # 🔹 Atualiza o vetor local (pendente)
                                     vector = load_document_vector()
-                                    vector['documents'].append({
-                                        "cid": message_obj['cid'],
-                                        "filename": message_obj['filename'],
-                                        "added_at": message_obj['timestamp'],
-                                        "embedding_shape": message_obj['embedding_shape'],
+                                    vector.setdefault("version_confirmed", 0)
+                                    vector.setdefault("version_pending", vector["version_confirmed"])
+                                    vector.setdefault("documents_confirmed", [])
+                                    vector.setdefault("documents_pending", [])
+
+                                    vector["version_pending"] = message_obj["version"]
+                                    vector["documents_pending"].append({
+                                        "cid": message_obj["cid"],
+                                        "filename": message_obj["filename"],
+                                        "added_at": message_obj["timestamp"],
+                                        "embedding_shape": message_obj["embedding_shape"],
                                         "embedding_file": f"{EMBEDDINGS_DIR}/{message_obj['cid']}.npy",
                                         "received_from_peer": True
                                     })
-                                    vector['version'] = message_obj['version']
                                     save_document_vector(vector)
-                                    
+                                    print(f"🕒 Documento pendente adicionado (versão {message_obj['version']})")
+
                                 except Exception as e:
                                     print(f"⚠️  Erro ao guardar embedding: {e}")
                                 
                                 yield f"data: {json.dumps(notification)}\n\n"
                                 print(f"Novo documento recebido: {message_obj['filename']} (v{message_obj['version']})")
+
                             else:
                                 # Mensagem genérica
                                 notification = {
@@ -513,7 +534,7 @@ async def get_notifications():
                                     'from': msg.get('from', 'unknown')[:20] + '...'
                                 }
                                 yield f"data: {json.dumps(notification)}\n\n"
-                        
+
                         except json.JSONDecodeError:
                             # Mensagem de texto simples
                             notification = {
@@ -541,6 +562,81 @@ async def get_notifications():
         }
     )
 
+@app.post("/confirm-version")
+def confirm_version(version: int, hash_received: str):
+    """
+    Recebe confirmação de peers e valida se hash corresponde à versão pendente.
+    (Simulação do comportamento esperado no Sprint 3)
+    """
+    vector = load_document_vector()
+
+    if vector.get("version_pending") != version:
+        return {"status": "rejected", "reason": "Versão pendente diferente"}
+
+    # Calcula hash local
+    import hashlib, json
+    local_hash = hashlib.sha256(
+        json.dumps(vector["documents_pending"], sort_keys=True).encode()
+    ).hexdigest()
+
+    if local_hash != hash_received:
+        return {"status": "rejected", "reason": "Hash inválida"}
+
+    # Se hash for válida, confirmar versão
+    vector["documents_confirmed"].extend(vector["documents_pending"])
+    vector["version_confirmed"] = version
+    vector["documents_pending"] = []
+    save_document_vector(vector)
+
+    print(f"✅ Versão {version} confirmada e promovida a estável")
+    return {"status": "confirmed", "version": version}
+
+@app.post("/ack-version")
+def ack_version():
+    """
+    Peer devolve a hash da versão pendente ao líder.
+    """
+    vector = load_document_vector()
+
+    if "documents_pending" not in vector or not vector["documents_pending"]:
+        return {"status": "error", "message": "Sem versão pendente para confirmar"}
+
+    version = vector.get("version_pending", 0)
+
+    # Calcula hash da versão pendente
+    vector_hash = hashlib.sha256(
+        json.dumps(vector["documents_pending"], sort_keys=True).encode()
+    ).hexdigest()
+
+    print(f"📩 Peer envia hash da versão pendente ({version}): {vector_hash[:12]}")
+
+    return {
+        "status": "ok",
+        "version": version,
+        "hash": vector_hash
+    }
+
+@app.post("/commit-version")
+def commit_version():
+    """
+    LÍDER envia commit aos peers para confirmar versão pendente.
+    """
+    vector = load_document_vector()
+
+    if not vector.get("documents_pending"):
+        return {"status": "error", "message": "Sem versão pendente para confirmar"}
+
+    version = vector.get("version_pending")
+
+    # Promove versão pendente → confirmada
+    vector["documents_confirmed"].extend(vector["documents_pending"])
+    vector["documents_pending"] = []
+    vector["version_confirmed"] = version
+    save_document_vector(vector)
+
+    print(f"✅ Commit aplicado. Versão {version} confirmada.")
+    return {"status": "committed", "version": version}
+
 # ============= INIT =============
 
 if __name__ == "__main__":
@@ -556,8 +652,10 @@ if __name__ == "__main__":
     
     vector = load_document_vector()
     print(f"\nVetor de Documentos:")
-    print(f"  └─ Versão atual: {vector['version']}")
-    print(f"  └─ Total documentos: {len(vector['documents'])}")
+    print(f"  └─ Versão confirmada: {vector.get('version_confirmed', 0)}")
+    print(f"  └─ Versão pendente: {vector.get('version_pending', 0)}")
+    print(f"  └─ Total confirmados: {len(vector.get('documents_confirmed', []))}")
+    print(f"  └─ Total pendentes: {len(vector.get('documents_pending', []))}")
     print("="*60 + "\n")
     
     uvicorn.run(
