@@ -1,5 +1,5 @@
 {
-  "version": 7,
+  "version": 8,
   "documents": [
     {
       "cid": "QmUPwBXJwS93CWrFv5PzGyygf5XYRu1BLD7KohPSgCBGjs",
@@ -63,7 +63,16 @@
         384
       ],
       "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy"
+    },
+    {
+      "cid": "QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y",
+      "filename": "teste_sprint2.txt",
+      "added_at": "2025-11-08T18:01:40.556783",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy"
     }
   ],
-  "last_updated": "2025-11-08T17:46:42.129720"
+  "last_updated": "2025-11-08T18:01:40.556791"
 }
