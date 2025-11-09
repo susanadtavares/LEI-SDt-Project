@@ -1,3 +1,2 @@
 
-Este é um documento de teste para o Sprint 3.
-O sistema gera embeddings que são armazenados no IPFS e transmitidos para os peers.
+Documento de teste para o Sprint 3.

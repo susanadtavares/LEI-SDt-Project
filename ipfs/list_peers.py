@@ -3,7 +3,7 @@ import json
 
 print("👥 A listar peers conectados...\n")
 
-response = requests.post("http://25.42.152.214:5001/api/v0/swarm/peers")
+response = requests.post("http://localhost:5001/api/v0/swarm/peers")
 peers = response.json()
 
 peer_list = peers.get('Peers', [])

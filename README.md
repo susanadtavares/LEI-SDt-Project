@@ -35,9 +35,9 @@ pip install -r requirements.txt
 python ipfs/server.py
 ```
 
-2. Iniciar o recetor de mensagens:
+2. Iniciar o sistema de votação:
 ```bash
-python ipfs/listen_notifications.py
+python ipfs/vote.py
 ```
 
 3. Iniciar o cliente:

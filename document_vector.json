@@ -74,5 +74,30 @@
       "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy"
     }
   ],
-  "last_updated": "2025-11-08T18:01:40.556791"
+  "last_updated": "2025-11-09T23:18:00.339913",
+  "version_confirmed": 1,
+  "version_pending": 0,
+  "documents_confirmed": [
+    {
+      "cid": "QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-09T22:32:09.534416",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy",
+      "confirmed": true
+    },
+    {
+      "cid": "QmW1F8KBZggUk9ATyccnaAnbSnvRKdWeg6NQCQjJdQj1Ei",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-09T23:18:00.339913",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmW1F8KBZggUk9ATyccnaAnbSnvRKdWeg6NQCQjJdQj1Ei.npy",
+      "confirmed": true
+    }
+  ],
+  "documents_pending": []
 }
