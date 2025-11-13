@@ -13,30 +13,43 @@ import hashlib
 import uuid
 from typing import Dict, Set
 
+# Cria a aplicação FastAPI
 app = FastAPI(title="IPFS Upload API")
 
+# URL base para a API do IPFS (gateway local)
 IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
+# Nome do canal PubSub onde os peers comunicam entre si
 CANAL_PUBSUB = "canal-ficheiros"
 
+# Caminhos e ficheiros usados para guardar metadados e embeddings
 VECTOR_FILE = "document_vector.json"
 EMBEDDINGS_DIR = "embeddings"
 PENDING_UPLOADS_DIR = "pending_uploads"
 
+# Garante que as pastas existem
 Path(EMBEDDINGS_DIR).mkdir(exist_ok=True)
 Path(PENDING_UPLOADS_DIR).mkdir(exist_ok=True)
 
 print("A carregar modelo SentenceTransformer...")
+# Modelo de embeddings usado para transformar texto em vetores numéricos
 embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 print("Modelo carregado com sucesso!")
 
+# Dicionário em memória para guardar sessões de votação ativas
 voting_sessions: Dict[str, dict] = {}
+# Peer ID deste nó (vai ser obtido do IPFS)
 my_peer_id = None
 
-# Track de peers do sistema e não do IPFS global
+# Track dos peers que estão a usar ESTE sistema (não todos os peers do IPFS global)
 peers: Dict[str, datetime] = {}
+# Tempo máximo de inatividade para remover peers (30 segundos)
 PEER_TIMEOUT = timedelta(seconds=30)
 
 def get_my_peer_id():
+    """
+    Obtém e guarda em cache o Peer ID deste nó através da API do IPFS.
+    Se já tiver sido obtido, reutiliza o valor.
+    """
     global my_peer_id
     if my_peer_id:
         return my_peer_id
@@ -50,10 +63,16 @@ def get_my_peer_id():
     return "unknown"
 
 def register_peer(peer_id: str):
+    """
+    Regista/atualiza um peer no dicionário local de peers, marcando a hora a que foi visto pela última vez.
+    """
     peers[peer_id] = datetime.now()
     cleanup_inactive_peers()
 
 def cleanup_inactive_peers():
+    """
+    Remove peers que já não são vistos há mais de PEER_TIMEOUT. Isto evita acumulação de peers "fantasma".
+    """
     now = datetime.now()
     inactive = [pid for pid, last_seen in peers.items() 
                 if now - last_seen > PEER_TIMEOUT]
@@ -62,6 +81,9 @@ def cleanup_inactive_peers():
         print(f"⚠️  Peer removido por inatividade: {pid[:16]}...")
 
 def get_peers_count():
+    """
+    Devolve o número de peers ativos no sistema. Garante também que o próprio peer está registado.
+    """
     cleanup_inactive_peers()
     
     my_id = get_my_peer_id()
@@ -72,6 +94,9 @@ def get_peers_count():
     return count
 
 def broadcast_heartbeat():
+    """
+    Envia um 'heartbeat' via PubSub para informar os outros peers que este nó continua ativo.
+    """
     try:
         message_data = {
             "type": "peer_heartbeat",
@@ -89,9 +114,13 @@ def broadcast_heartbeat():
             timeout=5
         )
     except:
+        # Se falhar, ignoramos silenciosamente
         pass
 
 def load_document_vector():
+    """
+    Carrega o ficheiro JSON que guarda o vetor de documentos (metadados), ou cria uma estrutura nova se não existir.
+    """
     if os.path.exists(VECTOR_FILE):
         with open(VECTOR_FILE, 'r') as f:
             return json.load(f)
@@ -107,10 +136,18 @@ def load_document_vector():
         }
 
 def save_document_vector(vector_data):
+    """
+    Guarda em disco o vetor de documentos (metadados) no ficheiro JSON.
+    """
     with open(VECTOR_FILE, 'w') as f:
         json.dump(vector_data, f, indent=2)
 
 def create_voting_session(doc_id, filename, content):
+    """
+    Cria uma nova sessão de votação para um documento recém-carregado.
+    - Calcula o número de votos necessários (50% + 1 dos peers ativos)
+    - Guarda o conteúdo temporariamente numa pasta de 'pending_uploads'
+    """
     total_peers = get_peers_count()
     required_votes = (total_peers // 2) + 1  # 50% + 1
     
@@ -121,13 +158,14 @@ def create_voting_session(doc_id, filename, content):
         "status": "pending_approval",
         "total_peers": total_peers,
         "required_votes": required_votes,
-        "votes_approve": set(),
-        "votes_reject": set(),
+        "votes_approve": set(),   # conjunto de peer_ids que aprovaram
+        "votes_reject": set(),    # conjunto de peer_ids que rejeitaram
         "created_at": datetime.now().isoformat(),
         "decided_at": None,
         "final_decision": None
     }
     
+    # Guarda o ficheiro no disco até a votação terminar
     temp_file = f"{PENDING_UPLOADS_DIR}/{doc_id}_{filename}"
     with open(temp_file, 'wb') as f:
         f.write(content)
@@ -135,6 +173,12 @@ def create_voting_session(doc_id, filename, content):
     return voting_sessions[doc_id]
 
 def process_vote(doc_id, peer_id, vote_type):
+    """
+    Processa um voto de um peer (approve/reject) para um determinado documento.
+    - Atualiza a sessão de votação
+    - Verifica se já foi atingida a maioria necessária
+    - Se sim, finaliza a votação (aprova ou rejeita)
+    """
     if doc_id not in voting_sessions:
         return {"status": "error", "message": "Sessão de votação não encontrada"}
     
@@ -143,9 +187,11 @@ def process_vote(doc_id, peer_id, vote_type):
     if session["status"] != "pending_approval":
         return {"status": "error", "message": "Votação já encerrada"}
     
+    # Garante que um peer só tem um voto válido (remove votos anteriores)
     session["votes_approve"].discard(peer_id)
     session["votes_reject"].discard(peer_id)
     
+    # Regista o novo voto
     if vote_type == "approve":
         session["votes_approve"].add(peer_id)
     elif vote_type == "reject":
@@ -157,24 +203,28 @@ def process_vote(doc_id, peer_id, vote_type):
     
     decision = None
     
+    # Maioria de aprovação alcançada
     if approve_count >= required:
         decision = "approved"
         session["status"] = "approved"
         session["final_decision"] = "approved"
         session["decided_at"] = datetime.now().isoformat()
         
+        # Finaliza o documento aprovado (envia para IPFS, cria embedding, etc.)
         result = finalize_approved_document(doc_id)
         return result
     
+    # Maioria de rejeição alcançada
     elif reject_count >= required:
         decision = "rejected"
         session["status"] = "rejected"
         session["final_decision"] = "rejected"
         session["decided_at"] = datetime.now().isoformat()
         
-        # Remove arquivo temporário
+        # Remove o ficheiro temporário e regista rejeição
         finalize_rejected_document(doc_id)
         
+        # Propaga a decisão de rejeição aos outros peers
         propagate_decision(doc_id, "rejected")
         
         return {
@@ -185,6 +235,7 @@ def process_vote(doc_id, peer_id, vote_type):
             "required_votes": required
         }
     
+    # Caso ainda não haja maioria, mantemos a votação aberta
     return {
         "status": "voting",
         "message": "Voto registado, a aguardar mais votos",
@@ -195,6 +246,16 @@ def process_vote(doc_id, peer_id, vote_type):
     }
 
 def finalize_approved_document(doc_id):
+    """
+    Quando um documento é aprovado:
+    - Lê o ficheiro temporário
+    - Faz upload para o IPFS (pin=True)
+    - Extrai texto e cria embedding
+    - Atualiza o vetor de documentos
+    - Guarda o embedding em ficheiro .npy
+    - Remove o ficheiro temporário
+    - Propaga a decisão de aprovação aos outros peers
+    """
     session = voting_sessions[doc_id]
     filename = session["filename"]
     
@@ -203,6 +264,7 @@ def finalize_approved_document(doc_id):
         content = f.read()
     
     try:
+        # Envia o ficheiro para o IPFS
         files = {'file': (filename, content)}
         response = requests.post(
             f"{IPFS_API_URL}/add",
@@ -216,20 +278,20 @@ def finalize_approved_document(doc_id):
         result = response.json()
         cid = result['Hash']
         
-        # Cria embeddings
+        # Cria embeddings a partir do conteúdo textual do documento
         text_content = extract_text_from_file(content, filename)
         embeddings = generate_embeddings(text_content)
         
-        # Atualiza vetor
+        # Atualiza o vetor de documentos com o novo documento confirmado
         new_version, updated_vector = add_document_to_vector(cid, filename, embeddings, confirmed=True)
         
-        # Guarda embedding
+        # Guarda o embedding num ficheiro .npy
         np.save(f"{EMBEDDINGS_DIR}/{cid}.npy", embeddings)
         
-        # Remove arquivo temporário
+        # Remove o ficheiro temporário
         os.remove(temp_file)
         
-        # Notifica peers
+        # Notifica os outros peers da decisão
         propagate_decision(doc_id, "approved", cid=cid, embeddings=embeddings, version=new_version)
         
         return {
@@ -247,6 +309,11 @@ def finalize_approved_document(doc_id):
         return {"status": "error", "message": f"Erro ao processar documento: {str(e)}"}
 
 def finalize_rejected_document(doc_id):
+    """
+    Quando um documento é rejeitado:
+    - Remove o ficheiro temporário (se existir)
+    - Regista a rejeição no vetor de documentos
+    """
     session = voting_sessions[doc_id]
     filename = session["filename"]
     temp_file = f"{PENDING_UPLOADS_DIR}/{doc_id}_{filename}"
@@ -254,7 +321,7 @@ def finalize_rejected_document(doc_id):
     if os.path.exists(temp_file):
         os.remove(temp_file)
     
-    # Adiciona ao vetor como rejeitado
+    # Adiciona informação da rejeição ao vetor
     vector = load_document_vector()
     vector.setdefault("documents_rejected", [])
     vector["documents_rejected"].append({
@@ -267,6 +334,11 @@ def finalize_rejected_document(doc_id):
     save_document_vector(vector)
 
 def add_document_to_vector(cid, filename, embeddings, confirmed=False):
+    """
+    Adiciona um documento ao vetor de metadados.
+    - Atualiza versões (confirmed/pending)
+    - Regista a informação básica e o caminho do ficheiro de embedding
+    """
     vector = load_document_vector()
     
     vector.setdefault("version_confirmed", 0)
@@ -274,6 +346,7 @@ def add_document_to_vector(cid, filename, embeddings, confirmed=False):
     vector.setdefault("documents_confirmed", [])
     vector.setdefault("documents_pending", [])
     
+    # Nova versão pendente (incrementa)
     new_version = vector["version_pending"] + 1
     
     doc_entry = {
@@ -300,6 +373,9 @@ def add_document_to_vector(cid, filename, embeddings, confirmed=False):
     return new_version, vector
 
 def generate_embeddings(text_content):
+    """
+    Usa o modelo SentenceTransformer para gerar um vetor numérico (embedding) a partir do texto fornecido.
+    """
     try:
         embedding = embedding_model.encode(text_content, convert_to_numpy=True)
         return embedding
@@ -308,13 +384,23 @@ def generate_embeddings(text_content):
         raise
 
 def extract_text_from_file(content, filename):
+    """
+    Extrai texto do ficheiro.
+    - Tenta decodificar como UTF-8.
+    - Se falhar, devolve apenas uma string genérica com o nome do ficheiro.
+    """
     try:
         text = content.decode('utf-8')
         return text
     except UnicodeDecodeError:
+        # Para binários, imagens, PDFs, etc., ficamos só com um "placeholder"
         return f"Document: {filename}"
 
 def propagate_proposal(doc_id, filename):
+    """
+    Propaga uma nova proposta de documento (novo upload) para todos os peers.
+    Envia uma mensagem via PubSub com tipo 'document_proposal'.
+    """
     try:
         session = voting_sessions[doc_id]
         
@@ -348,6 +434,10 @@ def propagate_proposal(doc_id, filename):
         return False
 
 def propagate_decision(doc_id, decision, cid=None, embeddings=None, version=None):
+    """
+    Propaga a decisão final sobre um documento (approved/rejected) aos outros peers.
+    Se aprovado, pode incluir o CID, a versão do vetor e o embedding.
+    """
     try:
         session = voting_sessions.get(doc_id)
         if not session:
@@ -364,6 +454,7 @@ def propagate_decision(doc_id, decision, cid=None, embeddings=None, version=None
             "from_peer": get_my_peer_id()
         }
         
+        # Se for approved, envia também os dados necessários para replicar o embedding
         if decision == "approved" and cid:
             message_data["cid"] = cid
             message_data["version"] = version
@@ -391,6 +482,10 @@ def propagate_decision(doc_id, decision, cid=None, embeddings=None, version=None
         return False
 
 def propagate_vote(doc_id, vote_type):
+    """
+    Propaga um voto local (approve/reject) para os outros peers via PubSub.
+    Isto permite que todos tenham uma visão consistente dos votos.
+    """
     try:
         message_data = {
             "type": "peer_vote",
@@ -420,6 +515,9 @@ def propagate_vote(doc_id, vote_type):
 
 @app.get("/")
 def root():
+    """
+    Endpoint raiz: devolve o estado geral da API, versões, contagem de documentos e peers ativos, bem como a lista de endpoints disponíveis.
+    """
     vector = load_document_vector()
     return {
         "message": "API IPFS ativa",
@@ -452,6 +550,12 @@ def root():
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
+    """
+    Endpoint para upload de ficheiros:
+    - Cria uma sessão de votação para o novo documento
+    - Guarda temporariamente o ficheiro
+    - Propaga a proposta aos outros peers via PubSub
+    """
     try:
         filename = file.filename
         content = await file.read()
@@ -460,8 +564,10 @@ async def upload_file(file: UploadFile = File(...)):
         print(f"NOVO UPLOAD RECEBIDO: {filename}")
         print(f"{'='*60}")
         
+        # Gera um ID único para este documento
         doc_id = str(uuid.uuid4())
         
+        # Cria a sessão de votação
         session = create_voting_session(doc_id, filename, content)
         
         print(f"📋 Sessão de votação criada")
@@ -469,6 +575,7 @@ async def upload_file(file: UploadFile = File(...)):
         print(f"   └─ Peers no sistema: {session['total_peers']}")
         print(f"   └─ Votos necessários: {session['required_votes']}")
         
+        # Envia a proposta aos outros peers
         propagated = propagate_proposal(doc_id, filename)
         
         print(f"{'='*60}\n")
@@ -492,6 +599,11 @@ async def upload_file(file: UploadFile = File(...)):
 
 @app.post("/vote/{doc_id}/{vote_type}")
 def vote_on_document(doc_id: str, vote_type: str):
+    """
+    Endpoint para votar num documento específico:
+    - vote_type deve ser 'approve' ou 'reject'
+    - Regista o voto localmente e propaga o voto via PubSub
+    """
     if vote_type not in ["approve", "reject"]:
         return JSONResponse(
             content={"error": "vote_type deve ser 'approve' ou 'reject'"},
@@ -500,14 +612,20 @@ def vote_on_document(doc_id: str, vote_type: str):
     
     peer_id = get_my_peer_id()
     
+    # Processa o voto local (pode finalizar a votação)
     result = process_vote(doc_id, peer_id, vote_type)
     
+    # Propaga o voto para os outros peers
     propagate_vote(doc_id, vote_type)
     
     return result
 
 @app.get("/voting-status")
 def get_all_voting_status():
+    """
+    Endpoint que devolve o estado de TODAS as sessões de votação ativas.
+    Útil para debugging ou monitorização do sistema.
+    """
     status_list = []
     
     for doc_id, session in voting_sessions.items():
@@ -531,6 +649,9 @@ def get_all_voting_status():
 
 @app.get("/voting-status/{doc_id}")
 def get_voting_status(doc_id: str):
+    """
+    Endpoint que devolve o estado de votação de um documento específico.
+    """
     if doc_id not in voting_sessions:
         return JSONResponse(
             content={"error": "Sessão de votação não encontrada"},
@@ -557,6 +678,12 @@ def get_voting_status(doc_id: str):
 
 @app.get("/vector")
 def get_document_vector():
+    """
+    Endpoint para ver um resumo do vetor de documentos:
+    - Versão confirmada
+    - Totais de confirmados, rejeitados e em votação
+    - Lista de documentos confirmados e rejeitados
+    """
     vector = load_document_vector()
     return {
         'version_confirmed': vector.get('version_confirmed', 0),
@@ -570,6 +697,13 @@ def get_document_vector():
 
 @app.get("/info/{cid}")
 def file_info(cid: str):
+    """
+    Endpoint que devolve informação detalhada sobre um ficheiro no IPFS:
+    - Estatísticas IPFS (object/stat)
+    - Se existe embedding
+    - Metadados no vetor de documentos
+    - URLs úteis (gateway, download, embedding)
+    """
     try:
         response = requests.post(
             f"{IPFS_API_URL}/object/stat",
@@ -590,6 +724,7 @@ def file_info(cid: str):
         vector = load_document_vector()
         doc_info = None
         
+        # Procura o documento no vetor de confirmados
         for doc in vector.get('documents_confirmed', []):
             if doc.get('cid') == cid:
                 doc_info = doc
@@ -615,6 +750,10 @@ def file_info(cid: str):
 
 @app.get("/download/{cid}")
 def download_file(cid: str):
+    """
+    Endpoint para descarregar um ficheiro a partir do IPFS, usando o CID.
+    - Tenta recuperar o nome original do ficheiro a partir do vetor de documentos
+    """
     try:
         response = requests.post(
             f"{IPFS_API_URL}/cat",
@@ -628,7 +767,7 @@ def download_file(cid: str):
                 status_code=404
             )
         
-        # Tenta obter o nome do ficheiro
+        # Tenta obter o nome do ficheiro a partir do vetor
         vector = load_document_vector()
         filename = "downloaded_file"
         
@@ -653,6 +792,13 @@ def download_file(cid: str):
 
 @app.get("/vector/{cid}/embedding")
 def get_embedding(cid: str):
+    """
+    Endpoint que devolve o embedding completo de um documento:
+    - Vetor (lista de floats)
+    - Dimensão e shape
+    - Estatísticas básicas (mean, std, min, max, norm)
+    - Metadados do documento
+    """
     try:
         embedding_path = f"{EMBEDDINGS_DIR}/{cid}.npy"
         if not os.path.exists(embedding_path):
@@ -697,6 +843,12 @@ def get_embedding(cid: str):
 
 @app.get("/documents")
 def list_all_documents():
+    """
+    Endpoint que lista:
+    - Documentos confirmados (com URLs úteis)
+    - Documentos ainda em votação
+    - Documentos rejeitados
+    """
     vector = load_document_vector()
     
     confirmed = []
@@ -738,6 +890,9 @@ def list_all_documents():
 
 @app.get("/search/{query}")
 def search_documents(query: str):
+    """
+    Endpoint simples de pesquisa por nome de ficheiro (substring case-insensitive) apenas em documentos confirmados.
+    """
     vector = load_document_vector()
     results = []
     
@@ -763,6 +918,10 @@ def search_documents(query: str):
 
 @app.delete("/document/{cid}")
 def delete_document(cid: str):
+    """
+    Endpoint que remove um documento do vetor de metadados (e o embedding).
+    NOTA: Não remove o ficheiro do IPFS, apenas do índice local.
+    """
     try:
         vector = load_document_vector()
         
@@ -775,6 +934,7 @@ def delete_document(cid: str):
         if len(vector['documents_confirmed']) < original_count:
             save_document_vector(vector)
             
+            # Remove o ficheiro de embedding se existir
             embedding_path = f"{EMBEDDINGS_DIR}/{cid}.npy"
             if os.path.exists(embedding_path):
                 os.remove(embedding_path)
@@ -799,6 +959,13 @@ def delete_document(cid: str):
 
 @app.get("/status")
 def ipfs_status():
+    """
+    Endpoint para verificar o estado de ligação ao IPFS e o estado geral do sistema:
+    - Versão do IPFS
+    - Peer ID
+    - Número de peers
+    - Versão do vetor e número de documentos
+    """
     try:
         response = requests.post(f"{IPFS_API_URL}/version", timeout=5)
         if response.status_code == 200:
@@ -816,6 +983,7 @@ def ipfs_status():
                 'message': 'Sistema ativo'
             }
     except:
+        # Se não conseguir falar com o IPFS, devolve disconnected
         return JSONResponse(
             content={'status': 'disconnected', 'message': 'IPFS não acessível'},
             status_code=503
@@ -823,6 +991,9 @@ def ipfs_status():
 
 @app.get("/peers")
 def get_peers():
+    """
+    Endpoint que devolve a lista de peers conhecidos pelo sistema, com a indicação se ainda são considerados ativos.
+    """
     cleanup_inactive_peers()
     return {
         'total_peers': len(peers),
@@ -838,14 +1009,24 @@ def get_peers():
 
 @app.get("/notifications")
 async def get_notifications():
+    """
+    Endpoint SSE (Server-Sent Events) que faz subscribe ao canal PubSub do IPFS e vai enviando ao cliente eventos em tempo real:
+    - Conexão estabelecida
+    - Propostas de documentos
+    - Votos de peers
+    - Decisões de aprovação/rejeição
+    - Heartbeats de peers
+    """
     async def event_stream():
         try:
             print(f"📡 Cliente conectado ao stream")
             
+            # Regista este peer e envia um heartbeat inicial
             my_id = get_my_peer_id()
             register_peer(my_id)
             broadcast_heartbeat()
             
+            # Faz subscribe ao canal PubSub
             response = requests.post(
                 f"{IPFS_API_URL}/pubsub/sub",
                 params={'arg': CANAL_PUBSUB},
@@ -853,33 +1034,40 @@ async def get_notifications():
                 timeout=None
             )
             
+            # Envia um evento inicial ao cliente
             yield f"data: {json.dumps({'type': 'connected', 'message': 'Conectado', 'canal': CANAL_PUBSUB, 'peer_id': my_id})}\n\n"
             
+            # Itera sobre as linhas de mensagens recebidas do PubSub
             for line in response.iter_lines():
                 if line:
                     try:
                         msg = json.loads(line)
                         data_encoded = msg.get('data', '')
                         
+                        # As mensagens do PubSub vêm em base64 -> decodificamos
                         try:
                             data_decoded = base64.b64decode(data_encoded).decode('utf-8')
                         except:
                             data_decoded = data_encoded
                         
                         try:
+                            # Tenta interpretar a mensagem como JSON
                             message_obj = json.loads(data_decoded)
                             msg_type = message_obj.get('type')
                             
+                            # Heartbeat de peers: apenas atualiza o peer e não envia evento ao cliente
                             if msg_type == 'peer_heartbeat':
                                 peer_id = message_obj.get('peer_id')
                                 if peer_id:
                                     register_peer(peer_id)
                                 continue
                             
+                            # Proposta de novo documento
                             elif msg_type == 'document_proposal':
                                 doc_id = message_obj['doc_id']
                                 filename = message_obj['filename']
                                 
+                                # Se ainda não temos esta sessão, cria uma sessão "remota"
                                 if doc_id not in voting_sessions:
                                     voting_sessions[doc_id] = {
                                         "doc_id": doc_id,
@@ -903,15 +1091,18 @@ async def get_notifications():
                                     'total_peers': message_obj['total_peers'],
                                     'from_peer': message_obj.get('from_peer', 'unknown')[:20]
                                 }
+                                # Envia evento SSE ao cliente
                                 yield f"data: {json.dumps(notification)}\n\n"
                                 print(f"📩 Nova proposta recebida: {filename}")
                             
+                            # Voto de um peer noutro nó
                             elif msg_type == 'peer_vote':
                                 doc_id = message_obj['doc_id']
                                 vote = message_obj['vote']
                                 peer_id = message_obj['peer_id']
                                 
                                 if doc_id in voting_sessions:
+                                    # Atualiza a sessão local com o voto remoto
                                     result = process_vote(doc_id, peer_id, vote)
                                     
                                     notification = {
@@ -923,10 +1114,12 @@ async def get_notifications():
                                     }
                                     yield f"data: {json.dumps(notification)}\n\n"
                             
+                            # Documento aprovado noutro peer
                             elif msg_type == 'document_approved':
                                 doc_id = message_obj['doc_id']
                                 cid = message_obj.get('cid')
                                 
+                                # Se recebemos os embeddings, guardamos localmente e atualizamos o vetor
                                 if 'embeddings' in message_obj and cid:
                                     embeddings_array = np.array(message_obj['embeddings'])
                                     np.save(f"{EMBEDDINGS_DIR}/{cid}.npy", embeddings_array)
@@ -943,6 +1136,7 @@ async def get_notifications():
                                     vector["version_confirmed"] = message_obj.get("version", vector.get("version_confirmed", 0) + 1)
                                     save_document_vector(vector)
                                 
+                                # Remove a sessão de votação local (se existir)
                                 if doc_id in voting_sessions:
                                     del voting_sessions[doc_id]
                                 
@@ -957,9 +1151,11 @@ async def get_notifications():
                                 yield f"data: {json.dumps(notification)}\n\n"
                                 print(f"✅ Documento aprovado: {message_obj['filename']}")
                             
+                            # Documento rejeitado noutro peer
                             elif msg_type == 'document_rejected':
                                 doc_id = message_obj['doc_id']
                                 
+                                # Remove a sessão de votação local (se existir)
                                 if doc_id in voting_sessions:
                                     del voting_sessions[doc_id]
                                 
@@ -974,6 +1170,7 @@ async def get_notifications():
                                 print(f"❌ Documento rejeitado: {message_obj['filename']}")
                         
                         except json.JSONDecodeError:
+                            # Se não for JSON válido, ignoramos
                             continue
                     
                     except Exception as e:
@@ -982,8 +1179,10 @@ async def get_notifications():
         
         except Exception as e:
             print(f"❌ Erro no stream: {e}")
+            # Em caso de erro no stream, envia um evento de erro ao cliente
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
     
+    # Devolve o StreamingResponse com o tipo 'text/event-stream' (SSE)
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
@@ -997,6 +1196,13 @@ async def get_notifications():
 # ============= INIT =============
 
 if __name__ == "__main__":
+    """
+    Ponto de entrada quando o ficheiro é executado diretamente.
+    - Mostra informação básica
+    - Regista o próprio peer
+    - Envia um heartbeat inicial
+    - Inicia o servidor Uvicorn na porta 5000
+    """
     print("\n" + "="*60)
     print("IPFS Upload API")
     print("="*60)
@@ -1007,15 +1213,17 @@ if __name__ == "__main__":
     print(f"Dimensão embeddings: 384")
     print("="*60)
     
+    # Obtém e regista o Peer ID local
     my_id = get_my_peer_id()
     register_peer(my_id)
     
     print(f"Peer ID: {my_id}")
     print(f"Peers no sistema: {get_peers_count()}")
     
-    # Enviar heartbeat inicial
+    # Enviar heartbeat inicial para os outros peers
     broadcast_heartbeat()
     
+    # Inicia o servidor FastAPI com Uvicorn
     uvicorn.run(
         app,
         host="0.0.0.0",
