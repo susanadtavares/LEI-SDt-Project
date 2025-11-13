@@ -1,19 +1,43 @@
+"""
+Interface de linha de comandos para listar documentos pendentes de votação e submeter votos ao servidor.
+
+Funcionalidade resumida:
+- `get_pending_documents()` — consulta o endpoint `/voting-status` do servidor local e retorna sessões cujo estado seja `pending_approval`.
+- `display_pending_documents()` — apresenta uma listagem amigável dos documentos pendentes.
+- `vote_interactive()` — loop interativo que aceita comandos do utilizador para listar documentos, votar, consultar status ou sair.
+
+Pressupostos:
+- O servidor de votação corre em `http://localhost:5000` e expõe os endpoints `/voting-status`, `/voting-status/<doc_id>` e `/vote/<doc_id>/<vote_type>`.
+"""
+
 import requests
 import json
 import time
 
 def get_pending_documents():
+    """Consulta o servidor e retorna a lista de sessões pendentes.
+
+    Retorna uma lista de dicionários representando sessões cujo campo `status` é `pending_approval`. Em caso de erro de rede ou resposta
+    inválida, retorna lista vazia.
+    """
     try:
         response = requests.get('http://localhost:5000/voting-status')
         if response.status_code == 200:
             data = response.json()
+            # Filtra apenas as sessões que estão pendentes de aprovação
             pending = [s for s in data['sessions'] if s['status'] == 'pending_approval']
             return pending
         return []
     except:
+        # Em caso de exceção (timeout, conexão, JSON inválido), devolve vazio
         return []
 
+
 def display_pending_documents(documents):
+    """Imprime uma listagem formatada dos documentos pendentes.
+
+    Retorna True se existirem documentos para mostrar, caso contrário imprime uma mensagem e retorna False.
+    """
     if not documents:
         print("\n❌ Nenhum documento pendente de votação\n")
         return False
@@ -23,6 +47,7 @@ def display_pending_documents(documents):
     print("="*70)
     
     for idx, doc in enumerate(documents, 1):
+        # Para cada documento mostramos metadados úteis ao utilizador
         print(f"\n[{idx}] {doc['filename']}")
         print(f"    Doc ID: {doc['doc_id']}")
         print(f"    Status: {doc['status']}")
@@ -34,7 +59,16 @@ def display_pending_documents(documents):
     print("\n" + "="*70 + "\n")
     return True
 
+
 def vote_interactive():
+    """Loop interativo que aceita comandos de votação do utilizador.
+
+    Comandos suportados:
+    - `list`: lista documentos pendentes
+    - `vote <número> approve|reject`: submete um voto
+    - `status <número>`: mostra estado detalhado de uma sessão
+    - `quit`: sai do loop
+    """
     print("\n" + "="*70)
     print("SISTEMA DE VOTAÇÃO")
     print("="*70)
@@ -54,10 +88,12 @@ def vote_interactive():
                 break
             
             elif command == 'list':
+                # Recupera e mostra documentos pendentes
                 documents = get_pending_documents()
                 display_pending_documents(documents)
             
             elif command.startswith('vote '):
+                # Separar o comando em partes: vote <número> <tipo>
                 parts = command.split()
                 if len(parts) != 3:
                     print("❌ Uso: vote <número> approve|reject")
@@ -71,6 +107,7 @@ def vote_interactive():
                         print("❌ Voto deve ser 'approve' ou 'reject'")
                         continue
                     
+                    # Re-obtemos a lista atual para garantir índices corretos
                     documents = get_pending_documents()
                     if doc_num < 1 or doc_num > len(documents):
                         print(f"❌ Documento {doc_num} não encontrado")
@@ -80,6 +117,7 @@ def vote_interactive():
                     
                     print(f"\n🗳️  A enviar voto: {vote_type.upper()} para documento #{doc_num}...")
                     
+                    # Envia o voto ao servidor
                     response = requests.post(f'http://localhost:5000/vote/{doc_id}/{vote_type}')
                     
                     if response.status_code == 200:
@@ -93,6 +131,7 @@ def vote_interactive():
                         elif status == 'rejected':
                             print("❌ DOCUMENTO REJEITADO!")
                         else:
+                            # Estado intermédio: voto registado mas decisão pendente
                             print("📊 VOTO REGISTADO")
                         
                         print("="*70)
@@ -103,6 +142,7 @@ def vote_interactive():
                             print(f"Faltam: {result.get('votes_remaining', 0)} votos")
                         print("="*70 + "\n")
                     else:
+                        # Em caso de erro HTTP, mostra a mensagem retornada
                         print(f"❌ Erro: {response.text}\n")
                 
                 except ValueError:
@@ -120,6 +160,7 @@ def vote_interactive():
                         continue
                     
                     doc_id = documents[doc_num - 1]['doc_id']
+                    # Consulta detalhada do estado da votação para um doc específico
                     response = requests.get(f'http://localhost:5000/voting-status/{doc_id}')
                     
                     if response.status_code == 200:
@@ -148,8 +189,9 @@ def vote_interactive():
         except Exception as e:
             print(f"❌ Erro: {e}")
 
+
 if __name__ == "__main__":
-    # Verificar conexão
+    # Verifica se o servidor está disponível antes de iniciar o loop
     try:
         response = requests.get('http://localhost:5000/status', timeout=2)
         if response.status_code == 200:
@@ -161,5 +203,6 @@ if __name__ == "__main__":
         else:
             print("❌ Servidor não responde")
     except:
+        # Mensagem informativa se não for possível conectar
         print("❌ Não foi possível conectar ao servidor")
         print("Certifica-te que o servidor está a correr")

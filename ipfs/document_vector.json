@@ -1,0 +1,58 @@
+{
+  "version_confirmed": 5,
+  "version_pending": 5,
+  "documents_confirmed": [
+    {
+      "cid": "QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-08T22:57:13.189045",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy",
+      "confirmed": false
+    },
+    {
+      "cid": "QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-08T22:59:04.208028",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy",
+      "confirmed": false
+    },
+    {
+      "cid": "QmaXBRZXMbGAV9rnYVVp25guy7cZAZtNHuPA6TGaFABJNM",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-08T23:02:54.709799",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmaXBRZXMbGAV9rnYVVp25guy7cZAZtNHuPA6TGaFABJNM.npy",
+      "confirmed": false
+    },
+    {
+      "cid": "QmaXBRZXMbGAV9rnYVVp25guy7cZAZtNHuPA6TGaFABJNM",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-08T23:04:58.533425",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmaXBRZXMbGAV9rnYVVp25guy7cZAZtNHuPA6TGaFABJNM.npy",
+      "confirmed": false
+    },
+    {
+      "cid": "QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y",
+      "filename": "teste_sprint3.txt",
+      "added_at": "2025-11-08T23:25:23.473873",
+      "embedding_shape": [
+        384
+      ],
+      "embedding_file": "embeddings/QmYC8smVrB8ct5N71soyHztyM4PaQ5H4bMKZWLQr3sWQ9Y.npy",
+      "confirmed": false
+    }
+  ],
+  "documents_pending": [],
+  "last_updated": "2025-11-08T23:25:23.473965"
+}
