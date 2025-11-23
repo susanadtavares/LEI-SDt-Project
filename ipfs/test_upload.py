@@ -1,116 +1,107 @@
 """
-Exemplo de upload de um ficheiro para votação e verificação de estado.
+Exemplo SIMPLIFICADO de upload de ficheiro via PubSub.
 
-O script faz o seguinte:
-- Envia o ficheiro `teste_sprint3.txt` para o endpoint `/upload` do servidor local.
-- Se o upload for aceite, monitora o estado da votação consultando repetidamente `/voting-status/<doc_id>` até a votação terminar (aprovação ou rejeição) ou até esgotar o tempo de espera.
-- No final, consulta o vetor global (`/vector`) para apresentar um resumo dos documentos confirmados/rejeitados.
+Este script:
+1. Faz upload do ficheiro para o IPFS
+2. Publica proposta via PubSub usando CLI do IPFS (mais confiável)
+3. Mostra mensagem de sucesso (votação acontece nos peers)
 
-Pressupostos:
-- O servidor de backend está a correr em `http://localhost:5000` e expõe os endpoints usados (`/upload`, `/voting-status/<id>`, `/vector`).
+Para ver o progresso da votação, use vote-pubsub-v3.py
 """
 
 import requests
 import json
-import time
+import uuid
+import sys
+import subprocess
+from datetime import datetime
+
+IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
+CANAL_PUBSUB = "canal-ficheiros"
 
 print("="*60)
-print("Upload com Embeddings")
+print("Upload Simples via PubSub")
 print("="*60)
 
-print("\n📤 A enviar ficheiro para votação...\n")
+filename = 'teste_sprintAHAHA.txt'
+doc_id = str(uuid.uuid4())
 
-# Abre o ficheiro local que será enviado. Usa modo 'rb' para enviar como multipart/form-data (files=...). O nome do ficheiro é `teste_sprint3.txt`.
-with open('teste_sprint3.txt', 'rb') as f:
-    files = {'file': f}
-    # Envia o ficheiro para o endpoint de upload do servidor
-    response = requests.post('http://localhost:5000/upload', files=files)
-    
-    if response.status_code == 200:
-        # Caso sucesso, o servidor devolve informações sobre a sessão de votação
-        result = response.json()
-        doc_id = result['doc_id']
-        
-        print("✅ FICHEIRO ENVIADO PARA VOTAÇÃO!")
-        print(f"   └─ Doc ID: {doc_id}")
-        print(f"   └─ Ficheiro: {result['filename']}")
-        print(f"   └─ Status: {result['status']}")
-        print(f"   └─ Total peers: {result['total_peers']}")
-        print(f"   └─ Votos necessários: {result['required_votes']}")
-        print(f"   └─ Propagado: {result['propagated']}")
-        
-        print("\n" + "="*60)
-        print("⏳ A aguardar votação dos peers...")
-        print("="*60)
-        
-        # Monitorizar o estado da votação durante um período (30s por defeito)
-        for i in range(30):
-            time.sleep(1)
-            
-            try:
-                # Consulta o estado atual da votação para o doc_id
-                status_response = requests.get(f'http://localhost:5000/voting-status/{doc_id}')
-                if status_response.status_code == 200:
-                    status = status_response.json()
-                    
-                    # Se a votação terminou, imprime o resultado e sai do loop
-                    if status['status'] in ['approved', 'rejected']:
-                        print("\n" + "="*60)
-                        if status['status'] == 'approved':
-                            print("✅ DOCUMENTO APROVADO!")
-                        else:
-                            print("❌ DOCUMENTO REJEITADO!")
-                        print("="*60)
-                        print(f"Votos a favor: {status['votes_approve']}")
-                        print(f"Votos contra: {status['votes_reject']}")
-                        print(f"Necessários: {status['required_votes']}")
-                        if status.get('final_decision'):
-                            print(f"Decisão final: {status['final_decision'].upper()}")
-                        print("="*60 + "\n")
-                        break
-                    
-                    else:
-                        # Mostra um resumo em linha (sem quebrar o terminal)
-                        print(f"\r🗳️  Votação a decorrer... A favor: {status['votes_approve']} | Contra: {status['votes_reject']} | Necessários: {status['required_votes']}", end='', flush=True)
-            except:
-                # Ignora erros temporários (ex.: timeout)
-                pass
-        
-        else:
-            # Se o loop terminar sem decisão final, informa o utilizador
-            print("\n\n⏱️  Tempo de espera excedido. Verifica o status manualmente.")
-    
-    else:
-        # Em caso de falha no upload, imprime o texto de erro retornado
-        print(f"\n❌ ERRO NO UPLOAD: {response.text}")
+print(f"\n📤 A enviar '{filename}' para o IPFS...")
 
-
-# Após o fluxo de upload/votação, consultamos o vetor global para obter um resumo do estado dos documentos no sistema.
-print("\n" + "="*60)
-print("A verificar o vetor de documentos...")
-print("="*60)
-
+# 1) Upload para IPFS
 try:
-    response = requests.get('http://localhost:5000/vector')
-    if response.status_code == 200:
-        vector = response.json()
-        print(f"\nVersão confirmada: {vector.get('version_confirmed', 0)}")
-        print(f"Total confirmados: {vector.get('total_confirmed', 0)}")
-        print(f"Total rejeitados: {vector.get('total_rejected', 0)}")
-        print(f"Pendentes de aprovação: {vector.get('total_pending_approval', 0)}")
-        
-        # Mostra até 3 documentos confirmados/rejeitados como exemplo
-        if vector.get('documents_confirmed'):
-            print("\n✅ Documentos confirmados:")
-            for doc in vector['documents_confirmed'][-3:]:  # últimos 3
-                print(f"   • {doc.get('filename')} → {doc.get('cid')}")
-        
-        if vector.get('documents_rejected'):
-            print("\n❌ Documentos rejeitados:")
-            for doc in vector['documents_rejected'][-3:]:
-                print(f"   • {doc.get('filename')} (rejeitado)")
+    with open(filename, 'rb') as f:
+        files = {'file': (filename, f)}
+        r = requests.post(f"{IPFS_API_URL}/add", files=files, timeout=30)
+    
+    if r.status_code == 200:
+        cid = r.json().get('Hash')
+        print(f"✅ Ficheiro adicionado ao IPFS")
+        print(f"   CID: {cid}")
+    else:
+        print(f"❌ Falha ao adicionar ao IPFS: {r.status_code}")
+        sys.exit(1)
+except FileNotFoundError:
+    print(f"❌ Ficheiro '{filename}' não encontrado!")
+    sys.exit(1)
 except Exception as e:
-    # Em caso de erro ao consultar o vetor, imprime a exceção
-    print(f"Erro: {e}")
+    print(f"❌ Erro ao adicionar ao IPFS: {e}")
+    sys.exit(1)
+
+# 2) Publica proposta via PubSub usando CLI
+print(f"\n📡 A publicar proposta via PubSub...")
+
+message = {
+    "type": "document_proposal",
+    "doc_id": doc_id,
+    "filename": filename,
+    "cid": cid,
+    "from_peer": "test_upload",
+    "timestamp": datetime.now().isoformat(),
+    "total_peers": 2,  # Ajusta conforme necessário
+    "required_votes": 2  # Maioria simples
+}
+
+message_json = json.dumps(message)
+
+# Usa CLI do IPFS (mais confiável que HTTP API para PubSub)
+try:
+    process = subprocess.Popen(
+        ['ipfs', 'pubsub', 'pub', CANAL_PUBSUB],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE
+    )
+    
+    stdout, stderr = process.communicate(input=message_json.encode('utf-8'), timeout=10)
+    
+    if process.returncode == 0:
+        print(f"✅ Proposta publicada com sucesso!")
+        print(f"\n" + "="*60)
+        print("📋 DETALHES DA PROPOSTA")
+        print("="*60)
+        print(f"Doc ID: {doc_id}")
+        print(f"Ficheiro: {filename}")
+        print(f"CID: {cid}")
+        print(f"Votos necessários: {message['required_votes']}")
+        print("="*60)
+        print("\n💡 Use 'vote-pubsub-v3.py' para votar!")
+        print("   Comando: vote 1 approve")
+    else:
+        print(f"❌ Falha ao publicar via CLI")
+        print(f"   Stderr: {stderr.decode('utf-8', errors='ignore')[:200]}")
+        sys.exit(1)
+
+except FileNotFoundError:
+    print("❌ Comando 'ipfs' não encontrado!")
+    print("   Certifica-te que o IPFS está instalado e no PATH")
+    sys.exit(1)
+except subprocess.TimeoutExpired:
+    process.kill()
+    print("❌ Timeout ao publicar via PubSub")
+    sys.exit(1)
+except Exception as e:
+    print(f"❌ Erro ao publicar via PubSub: {e}")
+    sys.exit(1)
 
 print("\n" + "="*60 + "\n")

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import hashlib
 import uuid
 from typing import Dict, Set
+import threading
 
 # Cria a aplicação FastAPI
 app = FastAPI(title="IPFS Upload API")
@@ -93,6 +94,7 @@ def get_peers_count():
     count = len(peers)
     return count
 
+####### HEARTBEAT
 def broadcast_heartbeat():
     """
     Envia um 'heartbeat' via PubSub para informar os outros peers que este nó continua ativo.
@@ -396,23 +398,32 @@ def extract_text_from_file(content, filename):
         # Para binários, imagens, PDFs, etc., ficamos só com um "placeholder"
         return f"Document: {filename}"
 
-def propagate_proposal(doc_id, filename):
+def propagate_proposal(doc_id, filename, cid=None):
     """
     Propaga uma nova proposta de documento (novo upload) para todos os peers.
     Envia uma mensagem via PubSub com tipo 'document_proposal'.
     """
     try:
         session = voting_sessions[doc_id]
-        
+
+        # obter total confirmado atual
+        vector = load_document_vector()
+        total_confirmed = len(vector.get("documents_confirmed", []))
+
         message_data = {
             "type": "document_proposal",
             "doc_id": doc_id,
             "filename": filename,
             "total_peers": session["total_peers"],
             "required_votes": session["required_votes"],
+            "total_confirmed": total_confirmed,
             "timestamp": datetime.now().isoformat(),
             "from_peer": get_my_peer_id()
         }
+
+        # inclui cid se disponível (cliente pode ter adicionado ao IPFS)
+        if cid:
+            message_data["cid"] = cid
         
         message_json = json.dumps(message_data)
         
@@ -442,6 +453,10 @@ def propagate_decision(doc_id, decision, cid=None, embeddings=None, version=None
         session = voting_sessions.get(doc_id)
         if not session:
             return False
+
+        # obter total confirmado atual
+        vector = load_document_vector()
+        total_confirmed = len(vector.get("documents_confirmed", []))
         
         message_data = {
             "type": f"document_{decision}",
@@ -450,6 +465,7 @@ def propagate_decision(doc_id, decision, cid=None, embeddings=None, version=None
             "decision": decision,
             "votes_approve": len(session["votes_approve"]),
             "votes_reject": len(session["votes_reject"]),
+            "total_confirmed": total_confirmed,
             "timestamp": datetime.now().isoformat(),
             "from_peer": get_my_peer_id()
         }
@@ -597,28 +613,7 @@ async def upload_file(file: UploadFile = File(...)):
             status_code=500
         )
 
-@app.post("/vote/{doc_id}/{vote_type}")
-def vote_on_document(doc_id: str, vote_type: str):
-    """
-    Endpoint para votar num documento específico:
-    - vote_type deve ser 'approve' ou 'reject'
-    - Regista o voto localmente e propaga o voto via PubSub
-    """
-    if vote_type not in ["approve", "reject"]:
-        return JSONResponse(
-            content={"error": "vote_type deve ser 'approve' ou 'reject'"},
-            status_code=400
-        )
-    
-    peer_id = get_my_peer_id()
-    
-    # Processa o voto local (pode finalizar a votação)
-    result = process_vote(doc_id, peer_id, vote_type)
-    
-    # Propaga o voto para os outros peers
-    propagate_vote(doc_id, vote_type)
-    
-    return result
+
 
 @app.get("/voting-status")
 def get_all_voting_status():
@@ -651,30 +646,78 @@ def get_all_voting_status():
 def get_voting_status(doc_id: str):
     """
     Endpoint que devolve o estado de votação de um documento específico.
+    Se não existir sessão em memória, tenta reconstruir a partir de ficheiro em pending_uploads.
     """
-    if doc_id not in voting_sessions:
-        return JSONResponse(
-            content={"error": "Sessão de votação não encontrada"},
-            status_code=404
-        )
-    
-    session = voting_sessions[doc_id]
-    
-    return {
-        "doc_id": doc_id,
-        "filename": session["filename"],
-        "status": session["status"],
-        "votes_approve": len(session["votes_approve"]),
-        "votes_reject": len(session["votes_reject"]),
-        "required_votes": session["required_votes"],
-        "total_peers": session["total_peers"],
-        "votes_remaining": session["required_votes"] - max(len(session["votes_approve"]), len(session["votes_reject"])),
-        "created_at": session["created_at"],
-        "decided_at": session.get("decided_at"),
-        "final_decision": session.get("final_decision"),
-        "peers_voted_approve": list(session["votes_approve"]),
-        "peers_voted_reject": list(session["votes_reject"])
-    }
+    # Se já existe sessão, devolve normalmente
+    if doc_id in voting_sessions:
+        session = voting_sessions[doc_id]
+        return {
+            "doc_id": doc_id,
+            "filename": session["filename"],
+            "status": session["status"],
+            "votes_approve": len(session["votes_approve"]),
+            "votes_reject": len(session["votes_reject"]),
+            "required_votes": session["required_votes"],
+            "total_peers": session["total_peers"],
+            "votes_remaining": session["required_votes"] - max(len(session["votes_approve"]), len(session["votes_reject"])),
+            "created_at": session["created_at"],
+            "decided_at": session.get("decided_at"),
+            "final_decision": session.get("final_decision"),
+            "peers_voted_approve": list(session["votes_approve"]),
+            "peers_voted_reject": list(session["votes_reject"])
+        }
+
+    # Tenta reconstruir sessão a partir de ficheiro pendente (caso o listener tenha gravado o ficheiro mas não criado sessão)
+    try:
+        matches = [fn for fn in os.listdir(PENDING_UPLOADS_DIR) if fn.startswith(f"{doc_id}_")]
+        if matches:
+            # pega no primeiro ficheiro que combine com doc_id
+            fname = matches[0]
+            temp_path = os.path.join(PENDING_UPLOADS_DIR, fname)
+            # extrai filename original
+            orig_filename = "_".join(fname.split("_")[1:])
+            with open(temp_path, 'rb') as rf:
+                content = rf.read()
+            # cria sessão manual (sem sobrescrever ficheiro)
+            total_peers = get_peers_count()
+            required_votes = (total_peers // 2) + 1
+            voting_sessions[doc_id] = {
+                "doc_id": doc_id,
+                "filename": orig_filename,
+                "content": content,
+                "status": "pending_approval",
+                "total_peers": total_peers,
+                "required_votes": required_votes,
+                "votes_approve": set(),
+                "votes_reject": set(),
+                "created_at": datetime.now().isoformat(),
+                "decided_at": None,
+                "final_decision": None
+            }
+            print(f"🔁 Sessão reconstruída a partir de ficheiro pendente: {temp_path} (doc_id={doc_id})")
+            session = voting_sessions[doc_id]
+            return {
+                "doc_id": doc_id,
+                "filename": session["filename"],
+                "status": session["status"],
+                "votes_approve": len(session["votes_approve"]),
+                "votes_reject": len(session["votes_reject"]),
+                "required_votes": session["required_votes"],
+                "total_peers": session["total_peers"],
+                "votes_remaining": session["required_votes"] - max(len(session["votes_approve"]), len(session["votes_reject"])),
+                "created_at": session["created_at"],
+                "decided_at": session.get("decided_at"),
+                "final_decision": session.get("final_decision"),
+                "peers_voted_approve": list(session["votes_approve"]),
+                "peers_voted_reject": list(session["votes_reject"])
+            }
+    except Exception as e:
+        print(f"⚠️ Erro ao tentar reconstruir sessão para {doc_id}: {e}")
+
+    return JSONResponse(
+        content={"error": "Sessão de votação não encontrada"},
+        status_code=404
+    )
 
 @app.get("/vector")
 def get_document_vector():
@@ -1195,6 +1238,161 @@ async def get_notifications():
 
 # ============= INIT =============
 
+def pubsub_bg_listener():
+    """
+    Listener em background que subscreve o canal PubSub do IPFS e processa mensagens
+    para criar sessões de votação remotamente (ex.: propostas enviadas por clientes via PubSub).
+    """
+    try:
+        print("📡 [BG] A conectar ao canal PubSub (background)...")
+        resp = requests.post(
+            f"{IPFS_API_URL}/pubsub/sub",
+            params={'arg': CANAL_PUBSUB},
+            stream=True,
+            timeout=None
+        )
+        print("✅ [BG] Subscrito ao PubSub (background)")
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                # decode safe
+                try:
+                    raw = line.decode('utf-8', errors='ignore').strip()
+                except Exception:
+                    raw = None
+                if not raw:
+                    continue
+
+                # Log envelope snippet for debugging
+                print(f"🔸 [BG] Envelope snippet: {raw[:300]}")
+
+                try:
+                    msg = json.loads(raw)
+                except Exception:
+                    # não é JSON válido no envelope -> ignora
+                    print(f"⚠️ [BG] Linha não-JSON recebida (ignorada) snippet: {raw[:200]}")
+                    continue
+
+                data_encoded = msg.get('data', '')
+                if not data_encoded:
+                    continue
+
+                # tenta base64 decode; se falhar, assume texto
+                data_decoded = None
+                try:
+                    if isinstance(data_encoded, (bytes, bytearray)):
+                        b = data_encoded
+                    else:
+                        b = data_encoded.encode('utf-8')
+                    b = b.strip()
+                    data_decoded = base64.b64decode(b).decode('utf-8')
+                except Exception:
+                    try:
+                        data_decoded = data_encoded if isinstance(data_encoded, str) else data_encoded.decode('utf-8', errors='ignore')
+                    except Exception:
+                        data_decoded = None
+
+                # Log data snippet
+                print(f"🔹 [BG] data snippet: {str(data_decoded)[:300]}")
+
+                if not data_decoded:
+                    continue
+
+                try:
+                    message_obj = json.loads(data_decoded)
+                except Exception:
+                    # não é JSON no data -> ignora
+                    print(f"⚠️ [BG] Conteúdo 'data' não é JSON (ignorado) snippet: {data_decoded[:200]}")
+                    continue
+
+                msg_type = message_obj.get('type')
+
+                # Heartbeat -> regista peer
+                if msg_type == 'peer_heartbeat':
+                    pid = message_obj.get('peer_id')
+                    if pid:
+                        register_peer(pid)
+                    continue
+
+                # Proposta de documento via PubSub (cliente enviou cid)
+                if msg_type == 'document_proposal':
+                    doc_id = message_obj.get('doc_id')
+                    filename = message_obj.get('filename')
+                    cid = message_obj.get('cid')
+                    sender = message_obj.get('from_peer', None)
+
+                    # Evita que o próprio servidor recrie sessão para propostas que ele mesmo enviou
+                    if sender == get_my_peer_id():
+                        continue
+
+                    if not doc_id or not filename:
+                        print(f"⚠️ [BG] Proposta sem doc_id/filename: {message_obj}")
+                        continue
+
+                    if doc_id in voting_sessions:
+                        print(f"ℹ️ [BG] Sessão já existe para {doc_id}")
+                        continue
+
+                    content = b''
+                    if cid:
+                        # tenta obter ficheiro do IPFS pelo cid
+                        try:
+                            r = requests.post(f"{IPFS_API_URL}/cat", params={'arg': cid}, timeout=30)
+                            if r.status_code == 200:
+                                content = r.content
+                                print(f"📥 [BG] Ficheiro obtido do IPFS para CID {cid} (doc_id={doc_id[:8]})")
+                            else:
+                                print(f"⚠️ [BG] Falha ao obter CID {cid} do IPFS (status {r.status_code})")
+                        except Exception as e:
+                            print(f"⚠️ [BG] Erro ao cat CID {cid}: {e}")
+
+                    # cria sessão local usando o conteúdo (pode ser vazio se falhar o cat)
+                    session = create_voting_session(doc_id, filename, content if content is not None else b'')
+                    session["received_from_peer"] = True
+
+                    print(f"📩 [BG] Proposta recebida via PubSub -> {filename} (doc_id={doc_id[:8]}). Sessão criada localmente.")
+                    # não repropaga se já veio com cid (evita loops)
+                    continue
+
+                # Voto vindo de PubSub
+                if msg_type == 'peer_vote':
+                    doc_id = message_obj.get('doc_id')
+                    vote = message_obj.get('vote')
+                    peer_id = message_obj.get('peer_id')
+                    if doc_id and vote and peer_id:
+                        process_vote(doc_id, peer_id, vote)
+                        continue
+
+                # Decisões aprovadas/rejeitadas -> sincroniza vetor local
+                if msg_type in ('document_approved', 'document_rejected'):
+                    doc_id = message_obj.get('doc_id')
+                    if doc_id and doc_id in voting_sessions:
+                        del voting_sessions[doc_id]
+                    if msg_type == 'document_approved' and 'embeddings' in message_obj and message_obj.get('cid'):
+                        cid = message_obj.get('cid')
+                        embeddings_array = np.array(message_obj['embeddings'])
+                        np.save(f"{EMBEDDINGS_DIR}/{cid}.npy", embeddings_array)
+                        vector = load_document_vector()
+                        vector.setdefault("documents_confirmed", [])
+                        vector["documents_confirmed"].append({
+                            "cid": cid,
+                            "filename": message_obj.get("filename"),
+                            "added_at": message_obj.get("timestamp"),
+                            "embedding_shape": message_obj.get("embedding_shape"),
+                            "embedding_file": f"{EMBEDDINGS_DIR}/{cid}.npy",
+                            "confirmed": True
+                        })
+                        vector["version_confirmed"] = message_obj.get("version", vector.get("version_confirmed", 0) + 1)
+                        save_document_vector(vector)
+                    continue
+                
+            except Exception as e:
+                print(f"⚠️ [BG] Erro ao processar mensagem PubSub: {e}")
+                continue
+    except Exception as e:
+        print(f"❌ [BG] Falha no listener PubSub: {e}")
+
 if __name__ == "__main__":
     """
     Ponto de entrada quando o ficheiro é executado diretamente.
@@ -1216,6 +1414,14 @@ if __name__ == "__main__":
     # Obtém e regista o Peer ID local
     my_id = get_my_peer_id()
     register_peer(my_id)
+    
+    # Inicia listener PubSub em background para receber uploads via PubSub
+    try:
+        t = threading.Thread(target=pubsub_bg_listener, daemon=True)
+        t.start()
+        print("🔁 Background PubSub listener iniciado")
+    except Exception as e:
+        print(f"⚠️ Não foi possível iniciar listener PubSub em background: {e}")
     
     print(f"Peer ID: {my_id}")
     print(f"Peers no sistema: {get_peers_count()}")
