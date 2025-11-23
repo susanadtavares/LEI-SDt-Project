@@ -1,15 +1,15 @@
 """
-VERSÃO FINAL - Sistema de votação via PubSub.
+VERSÃO FINAL COM LEADER HEARTBEAT - Sistema de votação via PubSub.
 
-CORREÇÕES IMPLEMENTADAS:
-- Leitura byte-a-byte em vez de readline() para capturar mensagens sem \n
+NOVA FUNCIONALIDADE:
+- Monitorização do líder (servidor)
+- Deteção automática de falha do líder (timeout 20s)
+- Notificação quando líder fica DOWN
+
+CORREÇÕES ANTERIORES:
+- Leitura byte-a-byte para capturar mensagens sem \n
 - Parser robusto para JSONs concatenados
-- Debug completo
 - voting_sessions como global partilhado entre threads
-
-Pressupostos:
-- IPFS daemon rodando com --enable-pubsub-experiment
-- Canal PubSub: 'canal-ficheiros'
 """
 
 import requests
@@ -24,6 +24,12 @@ from typing import Dict, List
 IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
 CANAL_PUBSUB = "canal-ficheiros"
 HEARTBEAT_INTERVAL = 5
+
+# Monitorização do líder
+LEADER_TIMEOUT = 20  # Segundos sem heartbeat para considerar líder DOWN
+last_leader_heartbeat: datetime = None
+leader_alive = True
+leader_id = None
 
 # Estado local sincronizado via PubSub
 voting_sessions: Dict[str, dict] = {}
@@ -132,17 +138,66 @@ def send_vote(doc_id: str, vote_type: str):
     return success
 
 
+def check_leader_status():
+    """
+    Verifica se o líder continua vivo baseado no timestamp do último heartbeat.
+    Se passaram mais de 20 segundos, marca líder como DOWN.
+    """
+    global leader_alive, last_leader_heartbeat
+    
+    if last_leader_heartbeat is None:
+        return  # Ainda não recebeu primeiro heartbeat
+    
+    time_since_last = (datetime.now() - last_leader_heartbeat).total_seconds()
+    
+    if time_since_last > LEADER_TIMEOUT:
+        if leader_alive:  # Transição de ALIVE → DOWN
+            leader_alive = False
+            print(f"\n🚨 LÍDER DOWN! Último heartbeat há {int(time_since_last)}s")
+            print(f"   Líder ID: {leader_id[:20] if leader_id else 'unknown'}...")
+            print(">>> ", end='', flush=True)
+    else:
+        if not leader_alive:  # Transição de DOWN → ALIVE (recuperação)
+            leader_alive = True
+            print(f"\n✅ LÍDER RECUPERADO! Heartbeat recebido")
+            print(">>> ", end='', flush=True)
+
+
+def leader_monitor_loop():
+    """
+    Thread que verifica periodicamente o estado do líder.
+    """
+    while running:
+        check_leader_status()
+        time.sleep(5)  # Verifica a cada 5 segundos
+
+
 def process_pubsub_message(message_obj: dict):
     """Processa mensagens recebidas do canal PubSub."""
-    global voting_sessions
+    global voting_sessions, last_leader_heartbeat, leader_alive, leader_id
     
     msg_type = message_obj.get('type')
     
-    if debug_mode and msg_type != 'peer_heartbeat':
+    if debug_mode and msg_type not in ['peer_heartbeat', 'leader_heartbeat']:
         print(f"📥 Mensagem recebida: {msg_type}")
     
     if msg_type == 'peer_heartbeat':
         pass
+    
+    elif msg_type == 'leader_heartbeat':
+        leader_id = message_obj.get('leader_id')
+        last_leader_heartbeat = datetime.now()
+        
+        # Se estava marcado como DOWN, marca como vivo novamente
+        if not leader_alive:
+            leader_alive = True
+            print(f"\n✅ LÍDER RECUPERADO!")
+            print(">>> ", end='', flush=True)
+        
+        if debug_mode:
+            pending = message_obj.get('pending_proposals', [])
+            confirmed = message_obj.get('total_confirmed', 0)
+            print(f"💓 Líder ALIVE | Pendentes: {len(pending)} | Confirmados: {confirmed}")
     
     elif msg_type == 'document_proposal':
         doc_id = message_obj.get('doc_id')
@@ -306,7 +361,7 @@ def pubsub_listener():
                         sender_peer = message_obj.get('peer_id')
                         msg_type = message_obj.get('type')
                         
-                        if sender_peer == my_peer_id and msg_type not in ['document_proposal', 'document_approved', 'document_rejected']:
+                        if sender_peer == my_peer_id and msg_type not in ['document_proposal', 'document_approved', 'document_rejected', 'leader_heartbeat']:
                             continue
                         
                         process_pubsub_message(message_obj)
@@ -344,11 +399,16 @@ def start_pubsub_listener():
     heartbeat_thread = threading.Thread(target=heartbeat_loop, daemon=True)
     heartbeat_thread.start()
     
+    # Thread de monitorização do líder
+    monitor_thread = threading.Thread(target=leader_monitor_loop, daemon=True)
+    monitor_thread.start()
+    
     time.sleep(2)
     send_heartbeat()
     
     if debug_mode:
         print(f"🔄 Heartbeats periódicos ativados (cada {HEARTBEAT_INTERVAL}s)")
+        print(f"🔍 Monitor do líder ativado (timeout: {LEADER_TIMEOUT}s)")
 
 
 def stop_pubsub_listener():
@@ -399,7 +459,7 @@ def vote_interactive():
     print("\n" + "="*70)
     print("SISTEMA DE VOTAÇÃO (PubSub)")
     print("="*70)
-    print("Comandos: list | all | vote <num> approve|reject | debug | quit")
+    print("Comandos: list | all | vote <num> approve|reject | leader | debug | quit")
     print("="*70 + "\n")
     
     while running:
@@ -430,6 +490,23 @@ def vote_interactive():
                         icon = "✅" if doc['status'] == 'approved' else "❌" if doc['status'] == 'rejected' else "⏳"
                         print(f"\n[{idx}] {icon} {doc['filename']} | {doc['status']}")
                     print("\n" + "="*70 + "\n")
+            
+            elif command == 'leader':
+                if last_leader_heartbeat is None:
+                    print("\n⚠️ Ainda não recebeu heartbeat do líder\n")
+                else:
+                    time_since = (datetime.now() - last_leader_heartbeat).total_seconds()
+                    status_icon = "✅" if leader_alive else "🚨"
+                    status_text = "ALIVE" if leader_alive else "DOWN"
+                    
+                    print(f"\n{'='*70}")
+                    print("STATUS DO LÍDER")
+                    print(f"{'='*70}")
+                    print(f"Status: {status_icon} {status_text}")
+                    print(f"Líder ID: {leader_id[:40] if leader_id else 'unknown'}...")
+                    print(f"Último heartbeat: há {int(time_since)}s")
+                    print(f"Timeout: {LEADER_TIMEOUT}s")
+                    print(f"{'='*70}\n")
             
             elif command == 'debug':
                 debug_mode = not debug_mode

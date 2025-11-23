@@ -13,6 +13,8 @@ import hashlib
 import uuid
 from typing import Dict, Set
 import threading
+import time
+import subprocess 
 
 # Cria a aplicação FastAPI
 app = FastAPI(title="IPFS Upload API")
@@ -45,6 +47,8 @@ my_peer_id = None
 peers: Dict[str, datetime] = {}
 # Tempo máximo de inatividade para remover peers (30 segundos)
 PEER_TIMEOUT = timedelta(seconds=30)
+
+LEADER_HEARTBEAT_INTERVAL = 5  # Envia a cada 5 segundos
 
 def get_my_peer_id():
     """
@@ -118,6 +122,74 @@ def broadcast_heartbeat():
     except:
         # Se falhar, ignoramos silenciosamente
         pass
+    
+    ##BROADCAST DE 5 EM 5 SEGUNDOS DO LEADER
+    
+def broadcast_leader_heartbeat():
+    """Envia heartbeat do líder com estado agregado do sistema (usando CLI)."""
+    try:
+        vector = load_document_vector()
+        
+        # Agrega propostas pendentes
+        pending_proposals = []
+        for doc_id, session in voting_sessions.items():
+            if session['status'] == 'pending_approval':
+                pending_proposals.append({
+                    'doc_id': doc_id,
+                    'filename': session['filename'],
+                    'votes_approve': len(session['votes_approve']),
+                    'votes_reject': len(session['votes_reject']),
+                    'required_votes': session['required_votes']
+                })
+        
+        message_data = {
+            "type": "leader_heartbeat",
+            "leader_id": get_my_peer_id(),
+            "timestamp": datetime.now().isoformat(),
+            "pending_proposals": pending_proposals,
+            "total_confirmed": len(vector.get('documents_confirmed', [])),
+            "total_rejected": len(vector.get('documents_rejected', [])),
+            "total_peers": get_peers_count(),
+            "active_peers": list(peers.keys())
+        }
+        
+        message_json = json.dumps(message_data)
+        
+        # USA CLI em vez de HTTP API!
+        import subprocess
+        process = subprocess.Popen(
+            ['ipfs', 'pubsub', 'pub', CANAL_PUBSUB],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        stdout, stderr = process.communicate(input=message_json.encode('utf-8'), timeout=5)
+        
+        if process.returncode == 0:
+            print(f"💓 Heartbeat líder enviado | Pendentes: {len(pending_proposals)}")
+        else:
+            print(f"⚠️ Erro ao enviar heartbeat líder")
+    
+    except Exception as e:
+        print(f"⚠️ Erro ao enviar heartbeat líder: {e}")
+
+
+def leader_heartbeat_loop():
+    """
+    Thread que envia heartbeats do líder periodicamente.
+    Agrupa estado do sistema em blocos enviados a cada 5 segundos.
+    """
+    print("🔄 Leader heartbeat loop iniciado")
+    
+    while True:
+        try:
+            broadcast_leader_heartbeat()
+            time.sleep(LEADER_HEARTBEAT_INTERVAL)
+        except Exception as e:
+            print(f"❌ Erro no heartbeat loop: {e}")
+            time.sleep(LEADER_HEARTBEAT_INTERVAL)
+
 
 def load_document_vector():
     """
@@ -1314,7 +1386,10 @@ def pubsub_bg_listener():
                     if pid:
                         register_peer(pid)
                     continue
-
+                
+                if msg_type == 'leader_heartbeat':
+                    # Servidor ignora, é só para peers
+                    continue
                 # Proposta de documento via PubSub (cliente enviou cid)
                 if msg_type == 'document_proposal':
                     doc_id = message_obj.get('doc_id')
@@ -1428,6 +1503,13 @@ if __name__ == "__main__":
     
     # Enviar heartbeat inicial para os outros peers
     broadcast_heartbeat()
+    
+    try:
+        leader_thread = threading.Thread(target=leader_heartbeat_loop, daemon=True)
+        leader_thread.start()
+        print("💓 Leader heartbeat thread iniciado (envia a cada 5s)")
+    except Exception as e:
+        print(f"⚠️ Erro ao iniciar leader heartbeat: {e}")
     
     # Inicia o servidor FastAPI com Uvicorn
     uvicorn.run(
