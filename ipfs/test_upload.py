@@ -1,7 +1,3 @@
-"""
-Cliente de teste para upload de ficheiros
-"""
-
 import requests
 import time
 
@@ -11,7 +7,7 @@ def test_upload():
     print("="*60)
     
     # Cria ficheiro de teste
-    test_content = f"Este é um documento de teste criado em {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    test_content = f"Documento de teste criado em {time.strftime('%Y-%m-%d %H:%M:%S')}"
     filename = f"teste_{int(time.time())}.txt"
     
     with open(filename, 'w') as f:

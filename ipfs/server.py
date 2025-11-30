@@ -17,7 +17,7 @@ import subprocess
 from typing import Dict, List
 from enum import Enum
 
-app = FastAPI(title="IPFS Distributed System - Leader")
+app = FastAPI(title="IPFS Distributed System")
 
 # Configuração
 IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
@@ -135,9 +135,16 @@ def load_faiss_index():
             faiss_cid_map = [doc['cid'] for doc in vector.get('documents_confirmed', [])]
             print(f"✅ FAISS carregado: {faiss_index.ntotal} vetores")
         except Exception as e:
-            print(f"⚠️  Erro ao carregar FAISS: {e}")
+            print(f"⚠️  Ficheiro FAISS corrompido, a criar novo: {e}")
+            try:
+                os.remove(FAISS_INDEX_FILE)
+            except:
+                pass
             faiss_index = faiss.IndexFlatL2(384)
             faiss_cid_map = []
+            print("✅ Novo índice FAISS criado")
+    else:
+        print("✅ Novo índice FAISS criado")
 
 
 def save_faiss_index():
@@ -509,9 +516,60 @@ def send_version_commit(version: int):
 # ============= PERSISTÊNCIA =============
 
 def load_document_vector():
+    """Carrega vetor de documentos com proteção contra corrupção"""
     if os.path.exists(VECTOR_FILE):
-        with open(VECTOR_FILE, 'r') as f:
-            return json.load(f)
+        try:
+            with open(VECTOR_FILE, 'r') as f:
+                content = f.read().strip()
+                
+                if not content:
+                    return {
+                        "version_confirmed": 0,
+                        "version_pending": 0,
+                        "documents_confirmed": [],
+                        "documents_temp": [],
+                        "documents_rejected": [],
+                        "last_updated": None
+                    }
+                
+                return json.loads(content)
+        
+        except json.JSONDecodeError as e:
+            print(f"⚠️  JSON corrompido: {e}")
+            print("⚠️  A criar novo ficheiro...")
+            
+            # Renomeia ficheiro corrompido para backup
+            backup_file = f"document_vector_backup_{int(time.time())}.json"
+            try:
+                os.rename(VECTOR_FILE, backup_file)
+                print(f"✅ Backup criado: {backup_file}")
+            except:
+                try:
+                    os.remove(VECTOR_FILE)
+                except:
+                    pass
+            
+            return {
+                "version_confirmed": 0,
+                "version_pending": 0,
+                "documents_confirmed": [],
+                "documents_temp": [],
+                "documents_rejected": [],
+                "last_updated": None
+            }
+        
+        except Exception as e:
+            print(f"⚠️  Erro ao ler JSON: {e}")
+            return {
+                "version_confirmed": 0,
+                "version_pending": 0,
+                "documents_confirmed": [],
+                "documents_temp": [],
+                "documents_rejected": [],
+                "last_updated": None
+            }
+    
+    # Ficheiro não existe
     return {
         "version_confirmed": 0,
         "version_pending": 0,
@@ -559,7 +617,12 @@ def root():
 async def upload_file(file: UploadFile = File(...)):
     if current_state != NodeState.LEADER:
         return JSONResponse(
-            content={"error": "Não sou líder", "leader_id": leader_id},
+            content={
+                "error": "Não sou líder",
+                "leader_id": leader_id,
+                "current_state": current_state.value,
+                "my_peer_id": get_my_peer_id()
+            },
             status_code=403
         )
     
@@ -612,6 +675,27 @@ def system_status():
         'version_confirmed': vector.get('version_confirmed', 0),
         'faiss_vectors': faiss_index.ntotal,
         'total_confirmed': len(vector.get('documents_confirmed', []))
+    }
+
+
+@app.post("/force-leader")
+def force_leader():
+    global current_state, leader_id, current_term
+    
+    current_state = NodeState.LEADER
+    leader_id = get_my_peer_id()
+    current_term += 1
+    
+    send_leader_heartbeat()
+    
+    print(f"\n👑 FORÇADO A SER LÍDER (Term {current_term})")
+    
+    return {
+        "status": "ok",
+        "message": "Promovido a líder",
+        "node_state": current_state.value,
+        "leader_id": leader_id,
+        "term": current_term
     }
 
 
@@ -803,18 +887,32 @@ def start_background_threads():
 
 @app.on_event("startup")
 async def startup_event():
+    global current_state, leader_id, current_term
+    
     my_id = get_my_peer_id()
     register_peer(my_id)
     load_faiss_index()
     
+    # Torna-se líder imediatamente
+    current_state = NodeState.LEADER
+    leader_id = my_id
+    current_term = 1
+    
     print("\n" + "="*60)
-    print("SISTEMA DISTRIBUÍDO - LÍDER")
+    print("SISTEMA DISTRIBUÍDO")
     print("="*60)
     print(f"Peer ID: {my_id}")
+    print(f"Estado: {current_state.value}")
+    print(f"Term: {current_term}")
     print(f"FAISS: {faiss_index.ntotal} vetores")
+    print("="*60)
+    print("\n✅ SERVIDOR PRONTO!")
     print("="*60 + "\n")
     
     start_background_threads()
+    
+    # Envia heartbeat imediatamente
+    send_leader_heartbeat()
 
 
 if __name__ == "__main__":
