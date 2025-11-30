@@ -1,38 +1,38 @@
 import requests
 import time
+import sys
+
+URL = "http://localhost:5000/upload"
 
 def test_upload():
-    print("="*60)
-    print("TESTE DE UPLOAD")
+    print("\n" + "="*60)
+    print("📤 TESTE DE UPLOAD ")
     print("="*60)
     
-    # Cria ficheiro de teste
-    test_content = f"Documento de teste criado em {time.strftime('%Y-%m-%d %H:%M:%S')}"
-    filename = f"teste_{int(time.time())}.txt"
+    filename = f"documento_{int(time.time())}.txt"
+    content = f"Documento de teste criado em {time.strftime('%Y-%m-%d %H:%M:%S')}."
     
     with open(filename, 'w') as f:
-        f.write(test_content)
-    
-    print(f"\n📤 A enviar '{filename}' para o líder...")
+        f.write(content)
+        
+    print(f"📄 Ficheiro criado: {filename}")
+    print(f"📡 A tentar conectar a: {URL}")
     
     try:
-        # Upload via HTTP
         with open(filename, 'rb') as f:
             files = {'file': (filename, f)}
-            response = requests.post('http://localhost:5000/upload', files=files, timeout=30)
-        
-        if response.status_code == 200:
-            result = response.json()
+            # Timeout curto para falhar rápido se servidor não existir
+            response = requests.post(URL, files=files, timeout=5)
             
+        if response.status_code == 200:
             print("\n✅ UPLOAD REALIZADO!")
             print(f"   └─ Doc ID: {result['doc_id']}")
             print(f"   └─ Ficheiro: {result['filename']}")
             print(f"   └─ Status: {result['status']}")
             print(f"   └─ Votos necessários: {result['required_votes']}")
-            
+
             print("\n⏳ Aguardando votação e processamento...")
-            print("   (Os peers vão votar automaticamente)")
-            
+
             # Aguarda processamento
             for i in range(30):
                 time.sleep(1)
@@ -46,21 +46,20 @@ def test_upload():
             
             print("\n\n✅ Processamento concluído!")
             print("="*60 + "\n")
-        
+
+            print(f"   {response.json()}")
         elif response.status_code == 403:
             error = response.json()
             print(f"\n❌ ERRO: {error.get('error')}")
-            print(f"   Líder atual: {error.get('leader_id', 'unknown')}")
-        
+            print(f"   Líder atual: {error.get('leader_id', 'desconhecido')}")
         else:
-            print(f"\n❌ ERRO: {response.text}")
-    
+            print(f"\n❌ FALHA: {response.status_code}")
+            print(f"   {response.text}")
+            
     except requests.exceptions.ConnectionError:
         print("\n❌ Não foi possível conectar ao servidor")
-        print("   Certifica-te que o servidor está a correr: python ipfs/server.py")
     except Exception as e:
         print(f"\n❌ Erro: {e}")
-
 
 if __name__ == "__main__":
     test_upload()

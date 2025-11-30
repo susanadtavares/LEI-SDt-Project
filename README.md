@@ -44,12 +44,12 @@ python ipfs/check_setup.py
 
 1. Iniciar o servidor principal:
 ```bash
-python ipfs/server.py
+python node.py --initial-leader
 ```
 
 2. Iniciar o sistema de votação:
 ```bash
-python ipfs/vote_pubsub.py
+python node.py
 ```
 
 3. Iniciar o cliente:
