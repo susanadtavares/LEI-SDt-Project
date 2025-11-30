@@ -1,6 +1,6 @@
 import uvicorn
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from sentence_transformers import SentenceTransformer
 import requests
 import json
@@ -12,10 +12,9 @@ import threading
 import time
 import subprocess
 import uuid
-import hashlib
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict
 from enum import Enum
 
@@ -29,30 +28,30 @@ TEMP_EMBEDDINGS_DIR = "temp_embeddings"
 FAISS_INDEX_FILE = "faiss_index.bin"
 
 # Timeouts
-HEARTBEAT_INTERVAL = 5
-LEADER_TIMEOUT = 15  # Tempo limite para considerar líder desconectado
-ELECTION_TIMEOUT_MIN = 10
-ELECTION_TIMEOUT_MAX = 20
+HEARTBEAT_INTERVAL = 4
+LEADER_TIMEOUT = 12  # Tempo limite para considerar líder desconectado
+ELECTION_TIMEOUT_MIN = 5
+ELECTION_TIMEOUT_MAX = 10
 
 # Diretórios
 Path(EMBEDDINGS_DIR).mkdir(exist_ok=True)
 Path(TEMP_EMBEDDINGS_DIR).mkdir(exist_ok=True)
 
-# Modelo AI
-print("🔄 A carregar modelo AI...")
+# Modelo SBERT
+print("🔄 A carregar modelo SentenceTransformers...", end=" ")
 try:
     embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
     print("✅ Modelo carregado!")
-except:
-    print("⚠️ Modelo não encontrado (verifique internet ou instalação)")
+except Exception as e:
+    print(f"❌ Erro modelo: {e}")
 
-# Estado do Nó
+# Estado do Node
 class NodeState(Enum):
     LEADER = "LEADER"
     CANDIDATE = "CANDIDATE"
     FOLLOWER = "FOLLOWER"
 
-# Variáveis Globais
+# Variáveis Globais de Estado
 current_state = NodeState.FOLLOWER
 current_term = 0
 voted_for = None
@@ -98,10 +97,14 @@ def publish_to_pubsub(message_data: dict):
     except: return False
 
 def configure_ipfs_auto_discovery():
-    """Ativa mDNS e Gossipsub para garantir conexão entre peers"""
-    print("🔧 A configurar IPFS Auto-Discovery...")
-    subprocess.run(['ipfs', 'config', '--json', 'Discovery.MDNS.Enabled', 'true'], capture_output=True)
-    subprocess.run(['ipfs', 'config', 'Pubsub.Router', 'gossipsub'], capture_output=True)
+    """Ativa mDNS e Gossipsub para garantir conexão entre peers na mesma rede"""
+    print("🔧 A configurar IPFS Auto-Discovery...", end=" ")
+    try:
+        subprocess.run(['ipfs', 'config', '--json', 'Discovery.MDNS.Enabled', 'true'], capture_output=True)
+        subprocess.run(['ipfs', 'config', 'Pubsub.Router', 'gossipsub'], capture_output=True)
+        print("✅")
+    except:
+        print("⚠️ (Erro config)")
 
 def load_faiss_index():
     global faiss_index, faiss_cid_map
@@ -130,10 +133,10 @@ def load_document_vector():
         except: pass
     return {"version_confirmed": 0, "documents_confirmed": [], "documents_temp": []}
 
-# ================= LÓGICA DE SERVIDOR HTTP (Ativa quando Líder) =================
+# ================= LÓGICA DE SERVIDOR HTTP (Ativa Dinamicamente) =================
 
 def start_http_server_thread():
-    """Inicia o servidor HTTP numa thread separada"""
+    """Inicia o servidor HTTP numa thread separada quando o node vira Líder"""
     global api_started
     if not api_started:
         print("\n🌐 A LEVANTAR SERVIDOR HTTP NA PORTA 5000...")
@@ -141,15 +144,15 @@ def start_http_server_thread():
         # Configuração do servidor Uvicorn
         config = uvicorn.Config(app, host="0.0.0.0", port=HTTP_PORT, log_level="critical")
         server = uvicorn.Server(config)
-        # Inicia numa thread para não bloquear o consenso
+        # Inicia numa thread daemon para não bloquear o script
         threading.Thread(target=server.run, daemon=True).start()
-        print("✅ API HTTP PRONTA! Aceita uploads.")
+        print("✅ API HTTP PRONTA! Este node agora aceita uploads.")
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     # Só aceita upload se for Líder
     if current_state != NodeState.LEADER:
-        return JSONResponse(content={"error": "Não sou líder. Aguarde reeleição."}, status_code=403)
+        return JSONResponse(content={"error": "Não sou líder. Aguarde reeleição ou conecte ao líder."}, status_code=403)
     
     try:
         filename = file.filename
@@ -162,22 +165,22 @@ async def upload_file(file: UploadFile = File(...)):
         temp_path = f"{TEMP_EMBEDDINGS_DIR}/upload_{doc_id}_{filename}"
         with open(temp_path, 'wb') as f: f.write(content)
         
-        # Inicia votação
+        # Inicia votação de documento
         voting_sessions[doc_id] = {
             "doc_id": doc_id, "filename": filename, "status": "pending_approval",
             "votes_approve": {get_my_peer_id()}, "votes_reject": set(),
-            "required_votes": 1, # Simplificado para teste. Num sistema real seria (N/2)+1
+            "required_votes": 1, # Simplificado. Num sistema real seria (NumPeers/2)+1
             "temp_path": temp_path
         }
         
-        # Propaga proposta
+        # Propaga proposta para a rede
         msg = {
             "type": "document_proposal", "doc_id": doc_id, "filename": filename,
             "term": current_term, "leader_id": get_my_peer_id()
         }
         publish_to_pubsub(msg)
         
-        return {"status": "pending_approval", "doc_id": doc_id}
+        return {"status": "pending_approval", "doc_id": doc_id, "message": "Proposta enviada para votação"}
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
@@ -188,13 +191,13 @@ def get_status():
         "state": current_state.value,
         "term": current_term,
         "leader": leader_id,
-        "api_active": api_started
+        "is_http_active": api_started
     }
 
 # ================= LÓGICA DE CONSENSO (RAFT SIMPLIFICADO) =================
 
 def send_heartbeat():
-    """Líder envia heartbeat periódico"""
+    """Líder envia heartbeat periódico para afirmar autoridade"""
     if current_state == NodeState.LEADER:
         msg = {
             "type": "leader_heartbeat", "leader_id": get_my_peer_id(),
@@ -207,8 +210,7 @@ def check_leader_alive():
     """Verifica se o líder morreu baseando-se no last_leader_heartbeat"""
     global last_leader_heartbeat
     if current_state == NodeState.LEADER: return True
-    
-    # Calcula diferença de tempo
+
     diff = (datetime.now() - last_leader_heartbeat).total_seconds()
     
     # Se passar do limite, considera desconectado
@@ -236,7 +238,7 @@ def start_election():
     # Aguarda votos por 3 segundos
     time.sleep(3)
     
-    # Se tiver votos suficientes (aqui > 0 porque votou em si mesmo e estamos a testar failover)
+    # Lógica de Maioria Simples para teste (quem tiver votos ganha)
     if len(votes_received) >= 1:
         become_leader()
 
@@ -249,20 +251,19 @@ def become_leader():
     leader_id = get_my_peer_id()
     
     print(f"\n{'='*40}")
-    print(f"👑 GANHOU ELEIÇÃO E ASSUME LIDERANÇA")
+    print(f"👑 GANHEI A ELEIÇÃO! ASSUME LIDERANÇA")
     print(f"{'='*40}")
     
     # 1. Envia Heartbeat imediato
     send_heartbeat()
     
-    # 2. ATIVA O SERVIDOR HTTP (Aqui está a magia)
+    # 2. ATIVA O SERVIDOR HTTP AUTOMATICAMENTE
     start_http_server_thread()
 
 def become_follower(new_term, new_leader):
     """Reconhece outro líder"""
     global current_state, current_term, voted_for, leader_id, last_leader_heartbeat
     
-    # Atualiza o timestamp do heartbeat SEMPRE que chama esta função
     last_leader_heartbeat = datetime.now()
     
     if new_term >= current_term:
@@ -297,18 +298,20 @@ def pubsub_listener():
             msg_type = data.get('type')
             sender = data.get('leader_id') or data.get('peer_id') or data.get('candidate_id')
             
-            # Ignora mensagens do próprio nó
             if sender == get_my_peer_id(): continue
 
-            # --- Lógica de Heartbeat ---
+            # --- HEARTBEAT ---
             if msg_type == 'leader_heartbeat':
                 term = data.get('term', 0)
                 if term >= current_term:
-                    # ATUALIZAÇÃO CRÍTICA DO TIMESTAMP
                     last_leader_heartbeat = datetime.now()
-                    become_follower(term, data.get('leader_id'))
+                    if current_state != NodeState.FOLLOWER:
+                        become_follower(term, data.get('leader_id'))
+                    else:
+                        # Apenas atualiza o timer silenciosamente se já for follower
+                        leader_id = data.get('leader_id')
 
-            # --- Lógica de Eleição ---
+            # --- ELEIÇÃO ---
             elif msg_type == 'election_request_vote':
                 term = data.get('term', 0)
                 cand = data.get('candidate_id')
@@ -325,7 +328,7 @@ def pubsub_listener():
                     votes_received.add(data.get('voter_id'))
                     print(f"✅ Voto recebido de {data.get('voter_id')[:10]}...")
 
-            # --- Lógica de Documentos ---
+            # --- DOCUMENTOS ---
             elif msg_type == 'document_proposal':
                 doc_id = data.get('doc_id')
                 print(f"📢 Proposta recebida: {data.get('filename')}. Voto APPROVE.")
@@ -337,9 +340,8 @@ def pubsub_listener():
                     session = voting_sessions[doc_id]
                     if data.get('vote') == 'approve':
                         session['votes_approve'].add(data.get('peer_id'))
-                        # Se tiver votos suficientes
                         if len(session['votes_approve']) >= session['required_votes']:
-                            print(f"✅ Aprovado! A finalizar {session['filename']}...")
+                            print(f"✅ Aprovado! A adicionar {session['filename']} ao IPFS...")
                             finalize_upload(doc_id)
 
             elif msg_type == 'version_commit':
@@ -360,15 +362,12 @@ def finalize_upload(doc_id):
     res = subprocess.run(['ipfs', 'add', '-Q', path], capture_output=True, text=True)
     cid = res.stdout.strip()
     
-    # Simula embedding para enviar
-    emb = [0.1, 0.2] # Placeholder
-    
     if os.path.exists(path): os.remove(path)
     
     # Publica Commit
     publish_to_pubsub({
         "type": "version_commit", "cid": cid, "filename": session['filename'],
-        "term": current_term, "embeddings": emb
+        "term": current_term
     })
     print(f"🚀 Commit enviado: {cid}")
     update_local_vector(cid, session['filename'])
@@ -394,15 +393,10 @@ def election_timer():
     last_leader_heartbeat = datetime.now()
     
     while running:
-        # Intervalo aleatório para evitar colisões
         time.sleep(random.uniform(1, 3))
         
         if current_state == NodeState.FOLLOWER:
             alive = check_leader_alive()
-            # Debug visual do tempo
-            # diff = (datetime.now() - last_leader_heartbeat).total_seconds()
-            # print(f"DEBUG: Diff={diff:.1f}s (Limit={LEADER_TIMEOUT})", end='\r')
-            
             if not alive:
                 start_election()
 
@@ -410,19 +404,17 @@ def election_timer():
 
 if __name__ == "__main__":
     print(f"\n{'='*50}")
-    print(f"🚀 NÓ IPFS UNIFICADO (SERVER + PEER)")
-    print(f"🆔 Peer ID: {get_my_peer_id()}")
+    print(f"Peer ID: {get_my_peer_id()}")
     print(f"{'='*50}\n")
     
     configure_ipfs_auto_discovery()
     load_faiss_index()
     
-    # Argumento opcional para iniciar já como líder (para o PC A)
     if len(sys.argv) > 1 and sys.argv[1] == "--initial-leader":
         print("👑 Configuração: Iniciar como LÍDER INICIAL")
         become_leader()
     else:
-        print("👀 Configuração: Iniciar como FOLLOWER")
+        print("👀 Configuração: Iniciar como seguidor")
         # Garante que timestamp inicial é válido para não disparar eleição imediata errada
         last_leader_heartbeat = datetime.now()
     
