@@ -28,6 +28,18 @@ source venv/bin/activate # Linux/MacOS
 pip install -r requirements.txt
 ```
 
+3. Iniciar o IPFS daemon:
+```bash
+ipfs daemon
+```
+
+## Verificação da Instalação
+
+1. Verificar se todas as dependências estão instaladas:
+```bash
+python ipfs/check_setup.py
+```
+
 ## Procedimento de Testes
 
 1. Iniciar o servidor principal:
@@ -37,7 +49,7 @@ python ipfs/server.py
 
 2. Iniciar o sistema de votação:
 ```bash
-python ipfs/vote.py
+python ipfs/vote_pubsub.py
 ```
 
 3. Iniciar o cliente:

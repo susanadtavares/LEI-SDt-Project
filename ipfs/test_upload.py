@@ -1,107 +1,70 @@
 """
-Exemplo SIMPLIFICADO de upload de ficheiro via PubSub.
-
-Este script:
-1. Faz upload do ficheiro para o IPFS
-2. Publica proposta via PubSub usando CLI do IPFS (mais confiável)
-3. Mostra mensagem de sucesso (votação acontece nos peers)
-
-Para ver o progresso da votação, use vote-pubsub-v3.py
+Cliente de teste para upload de ficheiros
 """
 
 import requests
-import json
-import uuid
-import sys
-import subprocess
-from datetime import datetime
+import time
 
-IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
-CANAL_PUBSUB = "canal-ficheiros"
-
-print("="*60)
-print("Upload Simples via PubSub")
-print("="*60)
-
-filename = 'teste_sprintAHAHA.txt'
-doc_id = str(uuid.uuid4())
-
-print(f"\n📤 A enviar '{filename}' para o IPFS...")
-
-# 1) Upload para IPFS
-try:
-    with open(filename, 'rb') as f:
-        files = {'file': (filename, f)}
-        r = requests.post(f"{IPFS_API_URL}/add", files=files, timeout=30)
+def test_upload():
+    print("="*60)
+    print("TESTE DE UPLOAD")
+    print("="*60)
     
-    if r.status_code == 200:
-        cid = r.json().get('Hash')
-        print(f"✅ Ficheiro adicionado ao IPFS")
-        print(f"   CID: {cid}")
-    else:
-        print(f"❌ Falha ao adicionar ao IPFS: {r.status_code}")
-        sys.exit(1)
-except FileNotFoundError:
-    print(f"❌ Ficheiro '{filename}' não encontrado!")
-    sys.exit(1)
-except Exception as e:
-    print(f"❌ Erro ao adicionar ao IPFS: {e}")
-    sys.exit(1)
-
-# 2) Publica proposta via PubSub usando CLI
-print(f"\n📡 A publicar proposta via PubSub...")
-
-message = {
-    "type": "document_proposal",
-    "doc_id": doc_id,
-    "filename": filename,
-    "cid": cid,
-    "from_peer": "test_upload",
-    "timestamp": datetime.now().isoformat(),
-    "total_peers": 2,  # Ajusta conforme necessário
-    "required_votes": 2  # Maioria simples
-}
-
-message_json = json.dumps(message)
-
-# Usa CLI do IPFS (mais confiável que HTTP API para PubSub)
-try:
-    process = subprocess.Popen(
-        ['ipfs', 'pubsub', 'pub', CANAL_PUBSUB],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
-    )
+    # Cria ficheiro de teste
+    test_content = f"Este é um documento de teste criado em {time.strftime('%Y-%m-%d %H:%M:%S')}"
+    filename = f"teste_{int(time.time())}.txt"
     
-    stdout, stderr = process.communicate(input=message_json.encode('utf-8'), timeout=10)
+    with open(filename, 'w') as f:
+        f.write(test_content)
     
-    if process.returncode == 0:
-        print(f"✅ Proposta publicada com sucesso!")
-        print(f"\n" + "="*60)
-        print("📋 DETALHES DA PROPOSTA")
-        print("="*60)
-        print(f"Doc ID: {doc_id}")
-        print(f"Ficheiro: {filename}")
-        print(f"CID: {cid}")
-        print(f"Votos necessários: {message['required_votes']}")
-        print("="*60)
-        print("\n💡 Use 'vote-pubsub-v3.py' para votar!")
-        print("   Comando: vote 1 approve")
-    else:
-        print(f"❌ Falha ao publicar via CLI")
-        print(f"   Stderr: {stderr.decode('utf-8', errors='ignore')[:200]}")
-        sys.exit(1)
+    print(f"\n📤 A enviar '{filename}' para o líder...")
+    
+    try:
+        # Upload via HTTP
+        with open(filename, 'rb') as f:
+            files = {'file': (filename, f)}
+            response = requests.post('http://localhost:5000/upload', files=files, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            
+            print("\n✅ UPLOAD REALIZADO!")
+            print(f"   └─ Doc ID: {result['doc_id']}")
+            print(f"   └─ Ficheiro: {result['filename']}")
+            print(f"   └─ Status: {result['status']}")
+            print(f"   └─ Votos necessários: {result['required_votes']}")
+            
+            print("\n⏳ Aguardando votação e processamento...")
+            print("   (Os peers vão votar automaticamente)")
+            
+            # Aguarda processamento
+            for i in range(30):
+                time.sleep(1)
+                try:
+                    status_response = requests.get('http://localhost:5000/status')
+                    if status_response.status_code == 200:
+                        status = status_response.json()
+                        print(f"\r   Versão confirmada: {status.get('version_confirmed', 0)} | FAISS: {status.get('faiss_vectors', 0)} vetores", end='', flush=True)
+                except:
+                    pass
+            
+            print("\n\n✅ Processamento concluído!")
+            print("="*60 + "\n")
+        
+        elif response.status_code == 403:
+            error = response.json()
+            print(f"\n❌ ERRO: {error.get('error')}")
+            print(f"   Líder atual: {error.get('leader_id', 'unknown')}")
+        
+        else:
+            print(f"\n❌ ERRO: {response.text}")
+    
+    except requests.exceptions.ConnectionError:
+        print("\n❌ Não foi possível conectar ao servidor")
+        print("   Certifica-te que o servidor está a correr: python ipfs/server.py")
+    except Exception as e:
+        print(f"\n❌ Erro: {e}")
 
-except FileNotFoundError:
-    print("❌ Comando 'ipfs' não encontrado!")
-    print("   Certifica-te que o IPFS está instalado e no PATH")
-    sys.exit(1)
-except subprocess.TimeoutExpired:
-    process.kill()
-    print("❌ Timeout ao publicar via PubSub")
-    sys.exit(1)
-except Exception as e:
-    print(f"❌ Erro ao publicar via PubSub: {e}")
-    sys.exit(1)
 
-print("\n" + "="*60 + "\n")
+if __name__ == "__main__":
+    test_upload()
