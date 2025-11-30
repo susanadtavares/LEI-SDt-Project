@@ -127,16 +127,16 @@ def check_leader_status():
 
 
 def start_election():
-    """Inicia processo de eleição"""
+    """Inicia processo eleitoral"""
     global current_state, current_term, voted_for, votes_received
     
     current_state = NodeState.CANDIDATE
     current_term += 1
     voted_for = get_my_peer_id()
     votes_received = {get_my_peer_id()}  # Vota em si mesmo
-    
+
     print(f"\n{'='*60}")
-    print(f"🗳️  INICIANDO ELEIÇÃO")
+    print(f"🗳️  A INICIAR ELEIÇÃO")
     print(f"{'='*60}")
     print(f"Term: {current_term}")
     print(f"Candidato: {voted_for[:20]}...")
@@ -286,6 +286,119 @@ def update_faiss_index_after_commit(cid: str):
     except Exception as e:
         print(f"❌ Erro ao atualizar FAISS: {e}")
         return False
+
+
+def configure_ipfs_auto_discovery():
+    """
+    Configura automaticamente o IPFS para descoberta de peers (mDNS)
+    Executa uma vez no início
+    """
+    print("\n🔧 Configurando auto-discovery de peers...")
+    
+    configs_applied = []
+    
+    # 1. Ativa mDNS (descoberta automática na rede local)
+    try:
+        result = subprocess.run(
+            ['ipfs', 'config', '--json', 'Discovery.MDNS.Enabled', 'true'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            configs_applied.append("mDNS ativado")
+    except:
+        pass
+    
+    # 2. Ativa DHT (tabela de hash distribuída)
+    try:
+        result = subprocess.run(
+            ['ipfs', 'config', 'Routing.Type', 'dht'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            configs_applied.append("DHT ativado")
+    except:
+        pass
+    
+    # 3. Ativa PubSub Router (Gossipsub)
+    try:
+        result = subprocess.run(
+            ['ipfs', 'config', 'Pubsub.Router', 'gossipsub'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            configs_applied.append("Gossipsub ativado")
+    except:
+        pass
+    
+    # 4. Aumenta intervalo de descoberta mDNS (mais agressivo)
+    try:
+        result = subprocess.run(
+            ['ipfs', 'config', '--json', 'Discovery.MDNS.Interval', '5'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            configs_applied.append("Intervalo mDNS: 5s")
+    except:
+        pass
+    
+    if configs_applied:
+        print("✅ Configurações aplicadas:")
+        for config in configs_applied:
+            print(f"   • {config}")
+        print("💡 As configurações entram em vigor imediatamente!")
+    else:
+        print("⚠️  Não foi possível aplicar configurações (pode já estar configurado)")
+    
+    return len(configs_applied) > 0
+
+
+def check_peer_connections():
+    """Verifica quantos peers estão conectados"""
+    try:
+        result = subprocess.run(
+            ['ipfs', 'swarm', 'peers'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        if result.returncode == 0:
+            peers = result.stdout.strip().split('\n')
+            peers = [p for p in peers if p]
+            return len(peers)
+    except:
+        pass
+    return 0
+
+
+def wait_for_peer_connections(max_wait=30):
+    """Aguarda até conectar a pelo menos 1 peer"""
+    print("\n🔍 A aguardar conexões de peers...")
+    
+    start_time = time.time()
+    
+    while time.time() - start_time < max_wait:
+        peer_count = check_peer_connections()
+        
+        if peer_count > 0:
+            print(f"✅ Conectado a {peer_count} peer(s)!")
+            return True
+        
+        elapsed = int(time.time() - start_time)
+        print(f"⏳ Aguardando... ({elapsed}s/{max_wait}s)", end='\r')
+        time.sleep(2)
+    
+    print(f"\n⚠️  Timeout: Nenhum peer conectado após {max_wait}s")
+    print("💡 O sistema vai continuar, mas a eleição só funciona com peers conectados")
+    return False
 
 
 def pubsub_listener():
@@ -590,9 +703,13 @@ def start_peer():
     my_id = get_my_peer_id()
     print(f"Peer ID: {my_id}")
     
-    # Carrega índice FAISS
+    configure_ipfs_auto_discovery()
+    
     load_faiss_index()
     print(f"FAISS: {faiss_index.ntotal} vetores")
+    
+    # AGUARDA CONEXÃO DE PEERS (opcional, mas recomendado)
+    wait_for_peer_connections(max_wait=15)
     
     running = True
     
@@ -600,6 +717,9 @@ def start_peer():
     threading.Thread(target=heartbeat_loop, daemon=True).start()
     threading.Thread(target=election_timer_loop, daemon=True).start()
     threading.Thread(target=pubsub_listener, daemon=True).start()
+    
+    print("\n✅ Peer iniciado e pronto!")
+    print("🔍 A monitorizar líder e a aguardar propostas...\n")
     
     # Mantém programa ativo
     try:
