@@ -30,7 +30,7 @@ pip install -r requirements.txt
 
 3. Iniciar o IPFS daemon:
 ```bash
-ipfs daemon
+ipfs daemon --enable-pubsub-experiment
 ```
 
 ## Verificação da Instalação
@@ -42,17 +42,12 @@ python ipfs/check_setup.py
 
 ## Procedimento de Testes
 
-1. Iniciar o servidor principal:
-```bash
-python ipfs/node.py --initial-leader
-```
-
-2. Iniciar o sistema de votação:
+1. Iniciar o sistema:
 ```bash
 python ipfs/node.py
 ```
 
-3. Iniciar o cliente:
+2. Iniciar o cliente:
 ```bash
 python ipfs/test_upload.py
 ```
