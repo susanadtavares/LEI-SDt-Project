@@ -1,6 +1,7 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sentence_transformers import SentenceTransformer
+from pydantic import BaseModel
 import requests
 import uvicorn
 import json
@@ -57,6 +58,18 @@ class NodeState(Enum):
     LEADER = "leader"
 
 # ==============================================
+# SEARCH REQUEST/RESULT
+# ==============================================
+class SearchRequest(BaseModel):
+    prompt: str
+    top_k: int = 5
+
+class SearchInitResponse(BaseModel):
+    id: str
+    token: str
+
+
+# ==============================================
 # THREAD-SAFE NODE CONTEXT
 # ==============================================
 
@@ -100,6 +113,10 @@ class NodeContext:
         
         # Estruturas temporárias
         self.temp_vectors: Dict[str, dict] = {}
+
+        self.search_requests: Dict[str, dict] = {}   # id -> {token, peer_id, created_at}
+        self.search_results: Dict[str, dict] = {}    # id -> {results, peer_id, created_at}
+        self.last_search_peer_index: int = 0
     
     def set_state(self, new_state: NodeState):
         """Thread-safe state transition"""
@@ -862,6 +879,91 @@ def criar_aplicacao_fastapi() -> FastAPI:
                 status_code=500
             )
     
+    @app.post("/search", response_model=SearchInitResponse)
+    async def start_search(req: SearchRequest):
+        if not node_ctx.is_leader():
+            return JSONResponse(
+                content={"error": "Este node não é o líder", "leader_id": node_ctx.leader_id},
+                status_code=403,
+            )
+
+        search_id = str(uuid.uuid4())
+        token = str(uuid.uuid4())
+
+        # escolher peer por round-robin entre peers ativos
+        with node_ctx._lock:
+            peers = sorted(node_ctx.peers.keys())
+            if not peers:
+                return JSONResponse(content={"error": "Nenhum peer disponível"}, status_code=503)
+            target_peer = peers[node_ctx.last_search_peer_index % len(peers)]
+            node_ctx.last_search_peer_index += 1
+
+            node_ctx.search_requests[search_id] = {
+                "token": token,
+                "peer_id": target_peer,
+                "prompt": req.prompt,
+                "top_k": req.top_k,
+                "created_at": datetime.now().isoformat(),
+            }
+
+        mensagem = {
+            "type": "search_request",
+            "search_id": search_id,
+            "token": token,
+            "prompt": req.prompt,
+            "top_k": req.top_k,
+            "target_peer": target_peer,
+            "leader_id": obter_peer_id(),
+            "timestamp": datetime.now().isoformat(),
+        }
+        publicar_mensagem(mensagem)
+
+        return {"id": search_id, "token": token}
+
+    @app.get("/search/{search_id}")
+    def get_search_result(search_id: str, token: str = Query(...)):
+        with node_ctx._lock:
+            req = node_ctx.search_requests.get(search_id)
+
+        if not req:
+            return JSONResponse(content={"error": "ID desconhecido"}, status_code=404)
+
+        if req["token"] != token:
+            return JSONResponse(content={"error": "Token inválido"}, status_code=403)
+
+        peer_id = req["peer_id"]
+
+        # se o próprio líder for o peer que processou
+        if peer_id == obter_peer_id():
+            with node_ctx._lock:
+                res = node_ctx.search_results.get(search_id)
+            if not res:
+                return JSONResponse(content={"status": "processing"}, status_code=202)
+            return {"id": search_id, "results": res["results"]}
+
+        # pedir resultado ao peer responsável
+        msg = {
+            "type": "search_result_request",
+            "search_id": search_id,
+            "from_leader": obter_peer_id(),
+            "target_peer": peer_id,
+            "timestamp": datetime.now().isoformat(),
+        }
+        publicar_mensagem(msg)
+
+        timeout = 5
+        interval = 0.2
+        waited = 0.0
+        while waited < timeout:
+            with node_ctx._lock:
+                res = node_ctx.search_results.get(search_id)
+            if res and res.get("peer_id") == peer_id:
+                return {"id": search_id, "results": res["results"]}
+            time.sleep(interval)
+            waited += interval
+
+        return JSONResponse(content={"status": "processing"}, status_code=202)
+    
     @app.get("/status")
     def get_status():
         """Status completo do sistema"""
@@ -930,6 +1032,8 @@ def criar_aplicacao_fastapi() -> FastAPI:
         )
     
     return app
+
+
 
 # ==============================================
 # MESSAGE PROCESSING
@@ -1057,6 +1161,126 @@ def processar_mensagem_pubsub(mensagem: dict):
         doc_id = mensagem.get("doc_id")
         filename = mensagem.get("filename")
         print(f"\n❌ DOCUMENTO REJEITADO: {filename}\n")
+    
+    elif msg_type == "search_request":
+        target_peer = mensagem.get("target_peer")
+        myid = obter_peer_id()
+        if target_peer and target_peer != myid:
+            return  # esta pesquisa é para outro peer
+
+        search_id = mensagem.get("search_id")
+        token = mensagem.get("token")
+        prompt = mensagem.get("prompt")
+        top_k = mensagem.get("top_k", 5)
+        leader_id = mensagem.get("leader_id")
+
+        threading.Thread(
+            target=processar_pesquisa_faiss,
+            args=(search_id, token, prompt, top_k, leader_id),
+            daemon=True,
+        ).start()
+
+    elif msg_type == "search_result_ready":
+        search_id = mensagem.get("search_id")
+        peer_id = mensagem.get("peer_id")
+        print(f"[SEARCH] Resultado {search_id} pronto no peer {peer_id}")
+    
+    elif msg_type == "search_result_request":
+        target_peer = mensagem.get("target_peer")
+        myid = obter_peer_id()
+        if target_peer != myid:
+            return
+        search_id = mensagem.get("search_id")
+        with node_ctx._lock:
+            res = node_ctx.search_results.get(search_id)
+        if not res:
+            return
+        resposta = {
+            "type": "search_result_response",
+            "search_id": search_id,
+            "peer_id": myid,
+            "results": res.get("results", []),
+            "timestamp": datetime.now().isoformat(),
+        }
+        publicar_mensagem(resposta)
+
+    elif msg_type == "search_result_response":
+        search_id = mensagem.get("search_id")
+        peer_id = mensagem.get("peer_id")
+        results = mensagem.get("results", [])
+        with node_ctx._lock:
+            # mantém token original se existir
+            token = None
+            if search_id in node_ctx.search_requests:
+                token = node_ctx.search_requests[search_id]["token"]
+            node_ctx.search_results[search_id] = {
+                "token": token,
+                "results": results,
+                "peer_id": peer_id,
+                "created_at": datetime.now().isoformat(),
+            }
+
+
+def processar_pesquisa_faiss(search_id: str, token: str, prompt: str, top_k: int, leader_id: str):
+    try:
+        import faiss
+    except ImportError:
+        print("FAISS não disponível neste peer")
+        return
+
+    print(f"[SEARCH] A processar pesquisa {search_id}...")
+
+    if not os.path.exists("faiss_index.faiss"):
+        print("Índice FAISS não encontrado")
+        results = []
+    else:
+        try:
+            index = faiss.read_index("faiss_index.faiss")
+        except Exception as e:
+            print("Erro ao ler índice FAISS", e)
+            results = []
+        else:
+            # embedding da prompt
+            query_emb = embedding_model.encode(prompt, convert_to_numpy=True).astype("float32")
+            query_emb = np.expand_dims(query_emb, axis=0)
+
+            distances, indices = index.search(query_emb, top_k)  # k vizinhos mais próximos[web:15]
+            distances = distances[0].tolist()
+            indices = indices[0].tolist()
+
+            vector = carregar_vetor_documentos()
+            docs = vector.get("documents_confirmed", [])
+
+            hits = []
+            for rank, idx in enumerate(indices):
+                if idx < 0 or idx >= len(docs):
+                    continue
+                doc = docs[idx]
+                hits.append({
+                    "rank": rank + 1,
+                    "distance": float(distances[rank]),
+                    "cid": doc.get("cid"),
+                    "filename": doc.get("filename"),
+                    "added_at": doc.get("added_at"),
+                })
+            results = hits
+
+    with node_ctx._lock:
+        node_ctx.search_results[search_id] = {
+            "token": token,
+            "results": results,
+            "peer_id": obter_peer_id(),
+            "created_at": datetime.now().isoformat(),
+        }
+
+    mensagem = {
+        "type": "search_result_ready",
+        "search_id": search_id,
+        "peer_id": obter_peer_id(),
+        "timestamp": datetime.now().isoformat(),
+    }
+    publicar_mensagem(mensagem)
+
 
 def verificar_resultado_votacao(doc_id: str):
     """Verifica se votação atingiu maioria (só líder)"""
@@ -1454,16 +1678,7 @@ def main():
                 
                 print(f"\n{'='*60}\n")
             
-            """
-            elif comando == "elect":
-                if not node_ctx.is_leader():
-                    print("\n🗳️ A forçar eleição...\n")
-                    iniciar_eleicao()
-                else:
-                    print("\n⚠️ Já és o líder!\n")
-            """
-            
-            elif comando:
+            else:
                 print("❌ Comando desconhecido\n")
     
     except KeyboardInterrupt:
