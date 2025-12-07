@@ -1,0 +1,28 @@
+{
+  "version_confirmed": 3,
+  "documents_confirmed": [
+    {
+      "cid": "Qma9nVasPhyUDkVyvGvv2BWjfwZGN3M3MnkJnLys6agNf8",
+      "filename": "teste.txt",
+      "added_at": "2025-12-07T18:27:36.222628",
+      "embedding_cid": "QmZYe4JkwBedgdrdSo8T2mA33SbRb9EsYqLB2SYLyg59KG",
+      "embedding_file": "embeddings/Qma9nVasPhyUDkVyvGvv2BWjfwZGN3M3MnkJnLys6agNf8.npy"
+    },
+    {
+      "cid": "QmYbA7aB21ZX2ZV6LXC2MNUFY11sRCKxPRVufx74BCTrBs",
+      "filename": "panqueca.txt",
+      "added_at": "2025-12-07T18:38:51.642960",
+      "embedding_cid": "QmcKiYKJYc9oh67hBnrNGCBmz2ZsD9bWba4zdgsgGgorRY",
+      "embedding_file": "embeddings/QmYbA7aB21ZX2ZV6LXC2MNUFY11sRCKxPRVufx74BCTrBs.npy"
+    },
+    {
+      "cid": "Qma9nVasPhyUDkVyvGvv2BWjfwZGN3M3MnkJnLys6agNf8",
+      "filename": "teste.txt",
+      "added_at": "2025-12-07T18:53:12.657665",
+      "embedding_cid": "QmZYe4JkwBedgdrdSo8T2mA33SbRb9EsYqLB2SYLyg59KG",
+      "embedding_file": "embeddings/Qma9nVasPhyUDkVyvGvv2BWjfwZGN3M3MnkJnLys6agNf8.npy"
+    }
+  ],
+  "documents_rejected": [],
+  "last_updated": "2025-12-07T18:53:12.657674"
+}

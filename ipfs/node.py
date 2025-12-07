@@ -23,7 +23,6 @@ from enum import Enum
 # ==============================================
 # CONFIGURAÇÃO GLOBAL
 # ==============================================
-
 IPFS_API_URL = "http://127.0.0.1:5001/api/v0"
 CANAL_PUBSUB = "canal-ficheiros"
 VECTOR_FILE = "document_vector.json"
@@ -114,8 +113,14 @@ class NodeContext:
         # Estruturas temporárias
         self.temp_vectors: Dict[str, dict] = {}
 
+        # Search requests and results
+        """O lider regista aqui cada pesquisa iniciada para saber quem pode pedir o token e qual peer processou a prompt"""
         self.search_requests: Dict[str, dict] = {}   # id -> {token, peer_id, created_at}
+
+        """cada peer guarda aqui o output do FAISS para cada ID"""
         self.search_results: Dict[str, dict] = {}    # id -> {results, peer_id, created_at}
+
+        """garante que cada pedido de search é enviado a peers diferentes em round-robin (ciclo entre peers ativos)"""
         self.last_search_peer_index: int = 0
     
     def set_state(self, new_state: NodeState):
@@ -881,6 +886,8 @@ def criar_aplicacao_fastapi() -> FastAPI:
     
     @app.post("/search", response_model=SearchInitResponse)
     async def start_search(req: SearchRequest):
+        print("DEBUG /search chamado com:", req.prompt, req.top_k)
+
         if not node_ctx.is_leader():
             return JSONResponse(
                 content={"error": "Este node não é o líder", "leader_id": node_ctx.leader_id},
@@ -889,14 +896,17 @@ def criar_aplicacao_fastapi() -> FastAPI:
 
         search_id = str(uuid.uuid4())
         token = str(uuid.uuid4())
+        my_id = obter_peer_id()
 
-        # escolher peer por round-robin entre peers ativos
         with node_ctx._lock:
             peers = sorted(node_ctx.peers.keys())
-            if not peers:
-                return JSONResponse(content={"error": "Nenhum peer disponível"}, status_code=503)
-            target_peer = peers[node_ctx.last_search_peer_index % len(peers)]
-            node_ctx.last_search_peer_index += 1
+
+            if len(peers) <= 1:
+                # Só há este nó → processa localmente
+                target_peer = my_id
+            else:
+                target_peer = peers[node_ctx.last_search_peer_index % len(peers)]
+                node_ctx.last_search_peer_index += 1
 
             node_ctx.search_requests[search_id] = {
                 "token": token,
@@ -906,31 +916,42 @@ def criar_aplicacao_fastapi() -> FastAPI:
                 "created_at": datetime.now().isoformat(),
             }
 
-        mensagem = {
-            "type": "search_request",
-            "search_id": search_id,
-            "token": token,
-            "prompt": req.prompt,
-            "top_k": req.top_k,
-            "target_peer": target_peer,
-            "leader_id": obter_peer_id(),
-            "timestamp": datetime.now().isoformat(),
-        }
-        publicar_mensagem(mensagem)
+        print("DEBUG /search criou search_id:", search_id, "target_peer:", target_peer)
+
+        # Modo single-node: processar logo aqui, sem PubSub
+        if target_peer == my_id and len(peers) <= 1:
+            threading.Thread(
+                target=processar_pesquisa_faiss,
+                args=(search_id, token, req.prompt, req.top_k, my_id),
+                daemon=True,
+            ).start()
+        else:
+            mensagem = {
+                "type": "search_request",
+                "search_id": search_id,
+                "token": token,
+                "prompt": req.prompt,
+                "top_k": req.top_k,
+                "target_peer": target_peer,
+                "leader_id": my_id,
+                "timestamp": datetime.now().isoformat(),
+            }
+            publicar_mensagem(mensagem)
 
         return {"id": search_id, "token": token}
 
-    @app.get("/search/{search_id}")
-    def get_search_result(search_id: str, token: str = Query(...)):
+
+    @app.get("/search/{search_id}") #obter resultados da pesquisa
+    def get_search_result(search_id: str, token: str = Query(...)): #
         with node_ctx._lock:
             req = node_ctx.search_requests.get(search_id)
-
+        # verifica se o pedido existe e se o token é válido
         if not req:
             return JSONResponse(content={"error": "ID desconhecido"}, status_code=404)
 
         if req["token"] != token:
             return JSONResponse(content={"error": "Token inválido"}, status_code=403)
-
+        #
         peer_id = req["peer_id"]
 
         # se o próprio líder for o peer que processou
@@ -1163,6 +1184,7 @@ def processar_mensagem_pubsub(mensagem: dict):
         print(f"\n❌ DOCUMENTO REJEITADO: {filename}\n")
     
     elif msg_type == "search_request":
+        print("DEBUG: search_request recebido:", mensagem)
         target_peer = mensagem.get("target_peer")
         myid = obter_peer_id()
         if target_peer and target_peer != myid:
