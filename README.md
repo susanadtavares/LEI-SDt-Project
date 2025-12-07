@@ -11,7 +11,7 @@ Este projeto surge no âmbito da disciplina de Sistemas Distribuídos, do Curso 
 
 ## Pré-requisitos
 
-- Python 3.12 ou superior
+- Python 3.12
 - IPFS instalado e em execução
 
 ## Instalação
