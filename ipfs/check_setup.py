@@ -70,7 +70,7 @@ def check_python():
     if version >= (3, 12):
         return True
     else:
-        print_error(f"Requer Python 3.12+ (atual: {version_str})", indent=1)
+        print_error(f"Requer Python 3.12 (atual: {version_str})", indent=1)
         print_info("Instalar: https://www.python.org/downloads/", indent=1)
         return False
 
